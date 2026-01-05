@@ -5,18 +5,42 @@ import PackageDescription
 
 let package = Package(
     name: "SwiftTopics",
+    platforms: [
+        .iOS(.v26),
+        .macOS(.v26),
+        .visionOS(.v26)
+    ],
     products: [
-        // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "SwiftTopics",
             targets: ["SwiftTopics"]
         ),
+        .library(
+            name: "SwiftTopicsApple",
+            targets: ["SwiftTopicsApple"]
+        ),
+    ],
+    dependencies: [
+        .package(url: "https://github.com/gifton/VectorAccelerate.git", from: "0.3.1"),
+        // EmbedKit for Apple embedding integration
+        .package(url: "https://github.com/gifton/EmbedKit.git", from: "0.2.7"),
     ],
     targets: [
-        // Targets are the basic building blocks of a package, defining a module or a test suite.
-        // Targets can depend on other targets in this package and products from dependencies.
         .target(
-            name: "SwiftTopics"
+            name: "SwiftTopics",
+            dependencies: [
+                .product(name: "VectorAccelerate", package: "VectorAccelerate"),
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency"),
+            ]
+        ),
+        .target(
+            name: "SwiftTopicsApple",
+            dependencies: [
+                "SwiftTopics",
+                .product(name: "EmbedKit", package: "EmbedKit"),
+            ]
         ),
         .testTarget(
             name: "SwiftTopicsTests",

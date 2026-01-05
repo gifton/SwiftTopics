@@ -1,0 +1,51 @@
+{
+  "originHash" : "230a67a9cdb1e1b97ef20a7e1466ffa88508077d07d75c8d9770d461dd5f5264",
+  "pins" : [
+    {
+      "identity" : "embedkit",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gifton/EmbedKit.git",
+      "state" : {
+        "revision" : "e936de0feee7a8a8e9d761be7e455d571218dfda",
+        "version" : "0.2.7"
+      }
+    },
+    {
+      "identity" : "onnxruntime-swift-package-manager",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/microsoft/onnxruntime-swift-package-manager",
+      "state" : {
+        "revision" : "12ce7374c86944e1f68f3a866d10105d8357f074",
+        "version" : "1.20.0"
+      }
+    },
+    {
+      "identity" : "swift-log",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-log.git",
+      "state" : {
+        "revision" : "bc386b95f2a16ccd0150a8235e7c69eab2b866ca",
+        "version" : "1.8.0"
+      }
+    },
+    {
+      "identity" : "vectoraccelerate",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gifton/VectorAccelerate.git",
+      "state" : {
+        "revision" : "620bfb17ac2e95c456ed6a3ac355271726e21980",
+        "version" : "0.3.2"
+      }
+    },
+    {
+      "identity" : "vectorcore",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/gifton/VectorCore",
+      "state" : {
+        "revision" : "506d3d2adc893fe1d24513b329568a6b834f20bc",
+        "version" : "0.1.6"
+      }
+    }
+  ],
+  "version" : 3
+}
