@@ -1,13 +1,13 @@
 {
-  "originHash" : "c88cff225a545cd30d9eb23d5988985ff691b4df6243b3b259dc698d8906e77b",
+  "originHash" : "d22ffb5ef890ef15040fb0ae71e71eab7de8bdfe3e2c06b9cbdb74ea8f5305f3",
   "pins" : [
     {
       "identity" : "embedkit",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/gifton/EmbedKit.git",
       "state" : {
-        "revision" : "e936de0feee7a8a8e9d761be7e455d571218dfda",
-        "version" : "0.2.7"
+        "revision" : "2e8f31024fdf42fa7d8d2ca3a65b908ea79cbc53",
+        "version" : "0.2.8"
       }
     },
     {

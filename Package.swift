@@ -23,7 +23,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/gifton/VectorAccelerate.git", from: "0.3.3"),
         // EmbedKit for Apple embedding integration
-        .package(url: "https://github.com/gifton/EmbedKit.git", from: "0.2.7"),
+        .package(url: "https://github.com/gifton/EmbedKit.git", from: "0.2.8"),
     ],
     targets: [
         .target(
