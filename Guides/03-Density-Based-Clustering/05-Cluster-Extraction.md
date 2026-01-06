@@ -495,7 +495,7 @@ let config = HDBSCANConfiguration(
 ## The ClusterAssignment Result
 
 ```swift
-// 📍 See: Sources/SwiftTopics/Clustering/ClusterAssignment.swift
+// 📍 See: Sources/SwiftTopics/Core/ClusterAssignment.swift
 
 public struct ClusterAssignment: Sendable {
     /// Cluster labels for each point. -1 indicates noise.

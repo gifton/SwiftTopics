@@ -191,7 +191,7 @@ public struct Embedding: Sendable, Codable, Hashable {
 The `EmbeddingProvider` protocol abstracts embedding sources:
 
 ```swift
-// 📍 See: Sources/SwiftTopics/Core/Embedding.swift (EmbeddingProvider)
+// 📍 See: Sources/SwiftTopics/Protocols/EmbeddingProvider.swift
 
 public protocol EmbeddingProvider: Sendable {
     /// The dimension of embeddings produced by this provider.
