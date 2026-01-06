@@ -1,5 +1,5 @@
 {
-  "originHash" : "230a67a9cdb1e1b97ef20a7e1466ffa88508077d07d75c8d9770d461dd5f5264",
+  "originHash" : "c88cff225a545cd30d9eb23d5988985ff691b4df6243b3b259dc698d8906e77b",
   "pins" : [
     {
       "identity" : "embedkit",
@@ -33,8 +33,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/gifton/VectorAccelerate.git",
       "state" : {
-        "revision" : "620bfb17ac2e95c456ed6a3ac355271726e21980",
-        "version" : "0.3.2"
+        "revision" : "b0cafb4de2f9e28f85df0bbea37b9726d5b50cab",
+        "version" : "0.3.3"
       }
     },
     {

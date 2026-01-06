@@ -16,8 +16,14 @@ public enum TopicModelStage: Sendable, Hashable {
     /// Reducing dimensionality of embeddings.
     case reduction
 
+    /// Detailed reduction sub-stage (UMAP with GPU).
+    case reductionDetail(phase: ReductionPhase, epoch: Int?, totalEpochs: Int?)
+
     /// Clustering embeddings into topics.
     case clustering
+
+    /// Detailed clustering sub-stage (HDBSCAN with GPU).
+    case clusteringDetail(phase: ClusteringPhase)
 
     /// Extracting topic representations (keywords).
     case representation
@@ -35,8 +41,16 @@ public enum TopicModelStage: Sendable, Hashable {
             return "Embedding documents (\(current)/\(total))"
         case .reduction:
             return "Reducing dimensions"
+        case .reductionDetail(let phase, let epoch, let totalEpochs):
+            if let e = epoch, let t = totalEpochs {
+                return "Reducing dimensions: \(phase.description) (epoch \(e)/\(t))"
+            } else {
+                return "Reducing dimensions: \(phase.description)"
+            }
         case .clustering:
             return "Clustering embeddings"
+        case .clusteringDetail(let phase):
+            return "Clustering: \(phase.description)"
         case .representation:
             return "Extracting keywords"
         case .evaluation:
@@ -51,9 +65,9 @@ public enum TopicModelStage: Sendable, Hashable {
         switch self {
         case .embedding:
             return 0.30  // Often the slowest part
-        case .reduction:
+        case .reduction, .reductionDetail:
             return 0.15
-        case .clustering:
+        case .clustering, .clusteringDetail:
             return 0.30
         case .representation:
             return 0.15
@@ -63,6 +77,46 @@ public enum TopicModelStage: Sendable, Hashable {
             return 0.0
         }
     }
+}
+
+// MARK: - Reduction Phases
+
+/// Detailed phases of the UMAP reduction pipeline.
+public enum ReductionPhase: String, Sendable, Hashable {
+    /// Building k-NN graph.
+    case knnGraph = "Building k-NN graph"
+    /// Computing fuzzy simplicial set.
+    case fuzzySet = "Computing fuzzy set"
+    /// Spectral initialization.
+    case spectralInit = "Spectral initialization"
+    /// GPU optimization epochs.
+    case optimization = "Optimization"
+    /// Complete.
+    case complete = "Complete"
+
+    /// Human-readable description.
+    public var description: String { rawValue }
+}
+
+// MARK: - Clustering Phases
+
+/// Detailed phases of the HDBSCAN clustering pipeline.
+public enum ClusteringPhase: String, Sendable, Hashable {
+    /// Computing core distances (k-NN search).
+    case coreDistances = "Computing core distances"
+    /// Computing mutual reachability distances.
+    case mutualReachability = "Computing mutual reachability"
+    /// Building minimum spanning tree.
+    case mstConstruction = "Building MST"
+    /// Building cluster hierarchy.
+    case hierarchyBuild = "Building hierarchy"
+    /// Extracting flat clusters.
+    case clusterExtraction = "Extracting clusters"
+    /// Complete.
+    case complete = "Complete"
+
+    /// Human-readable description.
+    public var description: String { rawValue }
 }
 
 // MARK: - Topic Model Progress
@@ -194,9 +248,9 @@ internal actor ProgressTracker {
         switch stage {
         case .embedding:
             return 0
-        case .reduction:
+        case .reduction, .reductionDetail:
             return TopicModelStage.embedding(current: 0, total: 1).weight
-        case .clustering:
+        case .clustering, .clusteringDetail:
             return TopicModelStage.embedding(current: 0, total: 1).weight
                 + TopicModelStage.reduction.weight
         case .representation:

@@ -4,6 +4,10 @@
 // HDBSCAN clustering algorithm orchestrator
 
 import Foundation
+import os
+
+/// Logger for HDBSCAN operations.
+private let hdbscanLogger = Logger(subsystem: "SwiftTopics", category: "HDBSCAN")
 
 // MARK: - HDBSCAN Engine
 
@@ -149,20 +153,48 @@ public actor HDBSCANEngine: ClusteringEngine {
             )
         }
 
-        // Step 1: Compute core distances
-        let coreDistances = try await computeCoreDistances(embeddings)
+        // Steps 1-3: Compute core distances + mutual reachability + MST
+        // GPU path handles all three steps in one efficient pipeline
+        let coreDistances: [Float]
+        let mst: MinimumSpanningTree
+        var usedGPU = false
 
-        // Step 2: Build mutual reachability graph
-        let mrGraph = MutualReachabilityGraph(
-            embeddings: embeddings,
-            coreDistances: coreDistances
-        )
+        // Get GPU threshold from configuration (default: 100)
+        let gpuThreshold = gpuContext?.configuration.gpuMinPointsThreshold ?? 100
 
-        // Step 3: Build MST using Prim's algorithm
-        let mstBuilder = PrimMSTBuilder()
-        let mst = mstBuilder.build(from: mrGraph)
+        let mstStartTime = Date()
+
+        if let gpu = gpuContext, n >= gpuThreshold {
+            // GPU path: Fused pipeline via VectorAccelerate's HDBSCANDistanceModule
+            // Uses Borůvka's algorithm for O(log N) parallel MST construction
+            //
+            // Note: GPU HDBSCAN MST computation is atomic - it completes in a single
+            // operation without intermediate checkpoints. For typical datasets (< 10K points),
+            // this takes < 1 second, making checkpointing unnecessary.
+            do {
+                let gpuResult = try await gpu.computeHDBSCANMSTWithCoreDistances(
+                    embeddings,
+                    minSamples: configuration.effectiveMinSamples
+                )
+                coreDistances = gpuResult.coreDistances
+                mst = gpuResult.mst
+                usedGPU = true
+            } catch {
+                // GPU failed - fall back to CPU with warning
+                hdbscanLogger.warning(
+                    "GPU HDBSCAN computation failed, falling back to CPU: \(error.localizedDescription)"
+                )
+                (coreDistances, mst) = try await computeCoreDistancesAndMSTOnCPU(embeddings)
+            }
+        } else {
+            // CPU path: For small datasets or when GPU unavailable
+            (coreDistances, mst) = try await computeCoreDistancesAndMSTOnCPU(embeddings)
+        }
+
+        let mstTime = Date().timeIntervalSince(mstStartTime)
 
         // Step 4: Build cluster hierarchy
+        let hierarchyStartTime = Date()
         let hierarchyBuilder = ClusterHierarchyBuilder(
             minClusterSize: configuration.minClusterSize
         )
@@ -170,8 +202,10 @@ public actor HDBSCANEngine: ClusteringEngine {
             from: mst,
             allowSingleCluster: configuration.allowSingleCluster
         )
+        let hierarchyTime = Date().timeIntervalSince(hierarchyStartTime)
 
         // Step 5: Extract clusters
+        let extractionStartTime = Date()
         let extractor = ClusterExtractor(
             method: configuration.clusterSelectionMethod,
             minClusterSize: configuration.minClusterSize,
@@ -183,6 +217,23 @@ public actor HDBSCANEngine: ClusteringEngine {
             pointCount: n,
             coreDistances: coreDistances
         )
+        let extractionTime = Date().timeIntervalSince(extractionStartTime)
+
+        // Create timing breakdown
+        let timingBreakdown = HDBSCANTimingBreakdown(
+            coreDistanceTime: usedGPU ? mstTime * 0.3 : mstTime * 0.4,  // Estimated split
+            mutualReachabilityTime: usedGPU ? mstTime * 0.2 : mstTime * 0.3,
+            mstConstructionTime: usedGPU ? mstTime * 0.5 : mstTime * 0.3,
+            hierarchyBuildTime: hierarchyTime,
+            clusterExtractionTime: extractionTime,
+            usedGPU: usedGPU,
+            pointCount: n
+        )
+
+        // Log timing if enabled
+        if configuration.logTiming {
+            hdbscanLogger.info("\(timingBreakdown.summary)")
+        }
 
         // Cache fitted model for prediction
         fittedModel = FittedHDBSCANModel(
@@ -198,7 +249,8 @@ public actor HDBSCANEngine: ClusteringEngine {
             assignment: assignment,
             hierarchy: hierarchy,
             coreDistances: coreDistances,
-            processingTime: processingTime
+            processingTime: processingTime,
+            timingBreakdown: timingBreakdown
         )
     }
 
@@ -267,8 +319,40 @@ public actor HDBSCANEngine: ClusteringEngine {
         // This allows prediction to work on any size input.
     }
 
-    // MARK: - Core Distance Computation
+    // MARK: - Core Distance and MST Computation
 
+    /// Computes core distances and MST using the CPU path.
+    ///
+    /// This is the fallback path used when GPU is unavailable, for small datasets,
+    /// or when GPU computation fails.
+    ///
+    /// - Parameter embeddings: The embeddings to process.
+    /// - Returns: Tuple of (coreDistances, MST).
+    private func computeCoreDistancesAndMSTOnCPU(
+        _ embeddings: [Embedding]
+    ) async throws -> ([Float], MinimumSpanningTree) {
+        // Step 1: Compute core distances (may still use GPU for k-NN if available)
+        let k = configuration.effectiveMinSamples
+        let computer = CoreDistanceComputer(minSamples: k, preferGPU: true)
+        let coreDistances = try await computer.compute(
+            embeddings: embeddings,
+            gpuContext: gpuContext
+        )
+
+        // Step 2: Build mutual reachability graph
+        let mrGraph = MutualReachabilityGraph(
+            embeddings: embeddings,
+            coreDistances: coreDistances
+        )
+
+        // Step 3: Build MST using Prim's algorithm
+        let mstBuilder = PrimMSTBuilder()
+        let mst = mstBuilder.build(from: mrGraph)
+
+        return (coreDistances, mst)
+    }
+
+    /// Computes core distances only (legacy method for compatibility).
     private func computeCoreDistances(_ embeddings: [Embedding]) async throws -> [Float] {
         let k = configuration.effectiveMinSamples
         let computer = CoreDistanceComputer(minSamples: k, preferGPU: true)

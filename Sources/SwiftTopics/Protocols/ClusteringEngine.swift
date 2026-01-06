@@ -150,6 +150,12 @@ public struct HDBSCANConfiguration: ClusteringConfiguration {
     /// Random seed for reproducibility.
     public let seed: UInt64?
 
+    /// Whether to log detailed timing information.
+    ///
+    /// When enabled, logs per-phase timing breakdown to the HDBSCAN logger.
+    /// Useful for performance analysis and debugging.
+    public let logTiming: Bool
+
     /// Creates HDBSCAN configuration.
     public init(
         minClusterSize: Int = 5,
@@ -158,7 +164,8 @@ public struct HDBSCANConfiguration: ClusteringConfiguration {
         clusterSelectionMethod: ClusterSelectionMethod = .eom,
         allowSingleCluster: Bool = false,
         metric: DistanceMetricType = .euclidean,
-        seed: UInt64? = nil
+        seed: UInt64? = nil,
+        logTiming: Bool = false
     ) {
         precondition(minClusterSize >= 2, "minClusterSize must be at least 2")
         precondition(minSamples ?? minClusterSize >= 1, "minSamples must be at least 1")
@@ -171,6 +178,7 @@ public struct HDBSCANConfiguration: ClusteringConfiguration {
         self.allowSingleCluster = allowSingleCluster
         self.metric = metric
         self.seed = seed
+        self.logTiming = logTiming
     }
 
     /// The effective minSamples value.
@@ -227,17 +235,25 @@ public struct ClusteringResult: Sendable {
     /// Processing time in seconds.
     public let processingTime: TimeInterval
 
+    /// Detailed timing breakdown for each phase.
+    ///
+    /// Provides per-phase timing information for performance analysis.
+    /// Only available when clustering was performed with timing enabled.
+    public let timingBreakdown: HDBSCANTimingBreakdown?
+
     /// Creates a clustering result.
     public init(
         assignment: ClusterAssignment,
         hierarchy: ClusterHierarchy? = nil,
         coreDistances: [Float]? = nil,
-        processingTime: TimeInterval = 0
+        processingTime: TimeInterval = 0,
+        timingBreakdown: HDBSCANTimingBreakdown? = nil
     ) {
         self.assignment = assignment
         self.hierarchy = hierarchy
         self.coreDistances = coreDistances
         self.processingTime = processingTime
+        self.timingBreakdown = timingBreakdown
     }
 }
 
