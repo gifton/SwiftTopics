@@ -326,7 +326,12 @@ public struct ClusterHierarchyNode: Sendable, Codable, Identifiable {
 ///
 /// Contains all nodes in the hierarchy tree, enabling cluster extraction
 /// via the Excess of Mass (EOM) or leaf methods.
-public struct ClusterHierarchy: Sendable, Codable {
+///
+/// ## Performance
+///
+/// Node lookups are O(1) via an internal index dictionary, enabling efficient
+/// hierarchy traversal during cluster extraction.
+public struct ClusterHierarchy: Sendable {
 
     /// All nodes in the hierarchy.
     public let nodes: [ClusterHierarchyNode]
@@ -334,22 +339,47 @@ public struct ClusterHierarchy: Sendable, Codable {
     /// The root node ID.
     public let rootID: Int
 
+    /// O(1) lookup index: nodeID → array index
+    ///
+    /// Built during initialization, not serialized (reconstructed on decode).
+    private let nodeIndex: [Int: Int]
+
     /// Creates a cluster hierarchy.
     ///
     /// - Parameters:
     ///   - nodes: All hierarchy nodes.
     ///   - rootID: The ID of the root node.
+    /// - Complexity: O(n) to build the lookup index.
     public init(nodes: [ClusterHierarchyNode], rootID: Int) {
         self.nodes = nodes
         self.rootID = rootID
+
+        // Build index once during construction: O(n)
+        var index = [Int: Int]()
+        index.reserveCapacity(nodes.count)
+        for (i, node) in nodes.enumerated() {
+            index[node.id] = i
+        }
+        self.nodeIndex = index
     }
 
     /// Gets a node by ID.
     ///
     /// - Parameter id: The node ID.
     /// - Returns: The node, or nil if not found.
+    /// - Complexity: O(1)
     public func node(id: Int) -> ClusterHierarchyNode? {
-        nodes.first { $0.id == id }
+        guard let idx = nodeIndex[id] else { return nil }
+        return nodes[idx]
+    }
+
+    /// Gets the array index for a node ID.
+    ///
+    /// - Parameter id: The node ID.
+    /// - Returns: The array index, or nil if not found.
+    /// - Complexity: O(1)
+    public func index(for id: Int) -> Int? {
+        nodeIndex[id]
     }
 
     /// Gets the root node.
@@ -372,5 +402,29 @@ public struct ClusterHierarchy: Sendable, Codable {
             return node.children.map { depth(nodeID: $0, current: current + 1) }.max() ?? current
         }
         return depth(nodeID: rootID, current: 0)
+    }
+}
+
+// MARK: - ClusterHierarchy + Codable
+
+extension ClusterHierarchy: Codable {
+
+    enum CodingKeys: String, CodingKey {
+        case nodes, rootID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let nodes = try container.decode([ClusterHierarchyNode].self, forKey: .nodes)
+        let rootID = try container.decode(Int.self, forKey: .rootID)
+        // Delegate to main initializer which builds the index
+        self.init(nodes: nodes, rootID: rootID)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(nodes, forKey: .nodes)
+        try container.encode(rootID, forKey: .rootID)
+        // nodeIndex is not encoded - it's rebuilt on decode
     }
 }

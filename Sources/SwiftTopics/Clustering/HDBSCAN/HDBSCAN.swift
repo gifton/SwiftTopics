@@ -352,17 +352,6 @@ public actor HDBSCANEngine: ClusteringEngine {
         return (coreDistances, mst)
     }
 
-    /// Computes core distances only (legacy method for compatibility).
-    private func computeCoreDistances(_ embeddings: [Embedding]) async throws -> [Float] {
-        let k = configuration.effectiveMinSamples
-        let computer = CoreDistanceComputer(minSamples: k, preferGPU: true)
-
-        return try await computer.compute(
-            embeddings: embeddings,
-            gpuContext: gpuContext
-        )
-    }
-
     // MARK: - Prediction Helpers
 
     private func computeClusterCentroids(model: FittedHDBSCANModel) -> [[Float]] {

@@ -205,13 +205,21 @@ private struct HierarchyBuildState {
             ))
         }
 
+        // Build O(1) lookup index: nodeID → array index
+        // This replaces O(n) firstIndex(where:) calls with O(1) dictionary lookups
+        var nodeIndexByID = [Int: Int]()
+        nodeIndexByID.reserveCapacity(nodes.count)
+        for (idx, node) in nodes.enumerated() {
+            nodeIndexByID[node.id] = idx
+        }
+
         // Set parent pointers and death levels
         for i in 0..<nodes.count {
             let nodeID = nodes[i].id
 
             if let parentID = parentMap[nodeID] {
-                // Find parent node index
-                if let parentIdx = nodes.firstIndex(where: { $0.id == parentID }) {
+                // Find parent node index - O(1) lookup
+                if let parentIdx = nodeIndexByID[parentID] {
                     let parentBirth = nodes[parentIdx].birthLevel
 
                     nodes[i] = ClusterHierarchyNode(
@@ -259,6 +267,9 @@ private struct HierarchyBuildState {
     ///
     /// This simplifies to: Σ (distance_birth - min(distance_death, distance_birth)) / (distance_birth × distance_death)
     /// But we use a simpler approximation based on persistence × size.
+    ///
+    /// - Note: Uses bottom-up dynamic programming (Fix #3) for O(n) complexity
+    ///   instead of O(n²) recursive traversal.
     private func computeStability(
         nodes: [ClusterHierarchyNode],
         minClusterSize: Int
@@ -270,6 +281,10 @@ private struct HierarchyBuildState {
         for (idx, node) in nodes.enumerated() {
             nodeByID[node.id] = idx
         }
+
+        // Fix #3: Precompute all leaf descendants in O(n) using bottom-up DP
+        // This replaces O(n²) recursive collectLeafDescendants() calls
+        let leafMap = buildLeafDescendantsMap(nodes: nodes, nodeByID: nodeByID)
 
         // Compute stability using lambda-based formula
         // λ = 1/distance, so we work with inverse distances
@@ -290,11 +305,10 @@ private struct HierarchyBuildState {
                 continue
             }
 
-            // Compute stability
-            let stability = computeNodeStability(
+            // Compute stability using precomputed leaf info (O(n) total)
+            let stability = computeNodeStabilityFast(
                 node: node,
-                nodes: nodes,
-                nodeByID: nodeByID
+                leafInfo: leafMap[node.id] ?? .empty
             )
 
             result[i] = ClusterHierarchyNode(
@@ -311,14 +325,77 @@ private struct HierarchyBuildState {
         return result
     }
 
-    /// Computes stability for a single node.
+    // MARK: - Bottom-Up Leaf Descendant Computation (Fix #3)
+
+    /// Builds a map of leaf descendants for all nodes in O(n) time.
     ///
-    /// The stability of a cluster is the sum over all points in the cluster of
-    /// the range of density levels where each point is a member.
-    private func computeNodeStability(
-        node: ClusterHierarchyNode,
+    /// This replaces the O(n²) recursive `collectLeafDescendants()` approach
+    /// with bottom-up dynamic programming:
+    /// 1. Sort nodes by size (smallest first = leaves before parents)
+    /// 2. Leaf nodes store only themselves
+    /// 3. Internal nodes merge their children's already-computed leaf lists
+    ///
+    /// - Parameters:
+    ///   - nodes: All hierarchy nodes.
+    ///   - nodeByID: Pre-built lookup index (nodeID → array index).
+    /// - Returns: Map from nodeID to its LeafInfo.
+    /// - Complexity: O(n) time and space.
+    private func buildLeafDescendantsMap(
         nodes: [ClusterHierarchyNode],
         nodeByID: [Int: Int]
+    ) -> [Int: LeafInfo] {
+        var leafMap = [Int: LeafInfo]()
+        leafMap.reserveCapacity(nodes.count)
+
+        // Process in bottom-up order: leaves first, then by increasing size
+        // This ensures children are always processed before their parents
+        let sortedNodes = nodes.sorted { $0.size < $1.size }
+
+        for node in sortedNodes {
+            if node.children.isEmpty {
+                // Leaf node: contains only itself
+                leafMap[node.id] = LeafInfo(
+                    leafIDs: [node.id],
+                    deathDistances: [node.deathLevel]
+                )
+            } else {
+                // Internal node: merge children's leaves (already computed)
+                var allLeaves = [Int]()
+                var allDeaths = [Float]()
+
+                // Pre-allocate based on node size (each point appears exactly once)
+                allLeaves.reserveCapacity(node.size)
+                allDeaths.reserveCapacity(node.size)
+
+                for childID in node.children {
+                    if let childInfo = leafMap[childID] {
+                        allLeaves.append(contentsOf: childInfo.leafIDs)
+                        allDeaths.append(contentsOf: childInfo.deathDistances)
+                    }
+                }
+
+                leafMap[node.id] = LeafInfo(
+                    leafIDs: allLeaves,
+                    deathDistances: allDeaths
+                )
+            }
+        }
+
+        return leafMap
+    }
+
+    /// Computes stability for a single node using precomputed leaf info.
+    ///
+    /// Same mathematical formula as `computeNodeStability()`, but uses
+    /// precomputed leaf descendants instead of recursive traversal.
+    ///
+    /// - Parameters:
+    ///   - node: The hierarchy node.
+    ///   - leafInfo: Precomputed leaf descendant information.
+    /// - Returns: Stability score.
+    private func computeNodeStabilityFast(
+        node: ClusterHierarchyNode,
+        leafInfo: LeafInfo
     ) -> Float {
         let birthDistance = node.birthLevel
         let deathDistance = node.deathLevel
@@ -329,72 +406,33 @@ private struct HierarchyBuildState {
         }
 
         // Convert to lambda (density) space
-        // λ = 1/distance, so λ_birth = 1/birth_distance (or 0 if birth at 0)
-        let lambdaBirth = birthDistance > Float.ulpOfOne ? 1.0 / birthDistance : Float.infinity
+        // λ = 1/distance, so λ_birth = 1/birth_distance
+        let lambdaBirth = birthDistance > Float.ulpOfOne
+            ? 1.0 / birthDistance
+            : Float.infinity
         let lambdaDeath = deathDistance > Float.ulpOfOne && deathDistance < Float.infinity
             ? 1.0 / deathDistance
             : 0
 
-        // For leaf nodes (individual points), stability contribution is based on
-        // when they were absorbed into this cluster
-        if node.children.isEmpty {
-            // Single point - contributes from lambda_birth to lambda_death
+        // For leaf nodes (empty leafInfo means single point)
+        if leafInfo.leafIDs.isEmpty {
             return max(0, lambdaBirth - lambdaDeath)
         }
 
-        // For internal nodes, stability is accumulated from all descendant points
-        // Each point contributes (λ_point_death - λ_cluster_birth)
-        // where λ_point_death is when the point left this cluster (merged up)
+        // For internal nodes: accumulate contributions from all leaf descendants
         var stability: Float = 0
 
-        // Collect all leaf descendants and their death levels within this cluster
-        let leaves = collectLeafDescendants(
-            nodeID: node.id,
-            nodes: nodes,
-            nodeByID: nodeByID
-        )
-
-        for (_, leafDeathDistance) in leaves {
-            // This leaf died (left this cluster) at leafDeathDistance
-            // It was born into this cluster at birthDistance
+        for leafDeathDistance in leafInfo.deathDistances {
             let leafLambdaDeath = leafDeathDistance > Float.ulpOfOne && leafDeathDistance < Float.infinity
                 ? 1.0 / leafDeathDistance
                 : 0
 
-            // Contribution is (λ_death - λ_birth) for this point's membership
-            // But we want the minimum of cluster death and point's individual death
             let effectiveLambdaDeath = max(leafLambdaDeath, lambdaDeath)
             let contribution = max(0, lambdaBirth - effectiveLambdaDeath)
             stability += contribution
         }
 
         return stability
-    }
-
-    /// Collects all leaf descendants of a node with their death distances.
-    private func collectLeafDescendants(
-        nodeID: Int,
-        nodes: [ClusterHierarchyNode],
-        nodeByID: [Int: Int]
-    ) -> [(leafID: Int, deathDistance: Float)] {
-        guard let nodeIdx = nodeByID[nodeID] else { return [] }
-        let node = nodes[nodeIdx]
-
-        if node.children.isEmpty {
-            // This is a leaf - it dies when absorbed into parent
-            return [(nodeID, node.deathLevel)]
-        }
-
-        // Recursively collect from children
-        var leaves = [(Int, Float)]()
-        for childID in node.children {
-            leaves.append(contentsOf: collectLeafDescendants(
-                nodeID: childID,
-                nodes: nodes,
-                nodeByID: nodeByID
-            ))
-        }
-        return leaves
     }
 }
 
@@ -408,6 +446,22 @@ private struct InternalNodeData {
     let sizeA: Int
     let sizeB: Int
     let birthDistance: Float
+}
+
+// MARK: - Leaf Info (for Bottom-Up Stability Computation)
+
+/// Precomputed leaf descendant information for a node.
+///
+/// Used to avoid O(n²) recursive traversal during stability computation.
+/// Each node stores its leaf descendants' IDs and death distances.
+private struct LeafInfo {
+    /// IDs of all leaf descendants.
+    var leafIDs: [Int]
+    /// Death distances of all leaf descendants (parallel to leafIDs).
+    var deathDistances: [Float]
+
+    /// Empty leaf info for convenience.
+    static let empty = LeafInfo(leafIDs: [], deathDistances: [])
 }
 
 // MARK: - Hierarchy Union Find
@@ -489,6 +543,7 @@ public struct CondensedTree: Sendable {
     /// - Parameters:
     ///   - hierarchy: The full cluster hierarchy.
     ///   - minClusterSize: Minimum size for a node to be retained.
+    /// - Complexity: O(n) where n is the number of nodes in the hierarchy.
     public init(hierarchy: ClusterHierarchy, minClusterSize: Int) {
         var condensedNodes = [CondensedTreeNode]()
 
@@ -508,8 +563,8 @@ public struct CondensedTree: Sendable {
                     effectiveParent = p
                     break
                 }
-                // Find this parent's parent in original hierarchy
-                currentParent = hierarchy.nodes.first(where: { $0.id == p })?.parent
+                // Find this parent's parent using O(1) lookup
+                currentParent = hierarchy.node(id: p)?.parent
             }
 
             // Find effective children (valid descendants)
@@ -519,7 +574,8 @@ public struct CondensedTree: Sendable {
                 let childID = queue.removeFirst()
                 if validIDs.contains(childID) {
                     effectiveChildren.append(childID)
-                } else if let child = hierarchy.nodes.first(where: { $0.id == childID }) {
+                } else if let child = hierarchy.node(id: childID) {
+                    // Use O(1) lookup instead of O(n) search
                     queue.append(contentsOf: child.children)
                 }
             }
