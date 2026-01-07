@@ -967,7 +967,7 @@ public actor InterruptibleTrainingRunner {
     private func loadKNNGraph(from url: URL) async throws -> NearestNeighborGraph {
         let data = try Data(contentsOf: url)
 
-        return try data.withUnsafeBytes { buffer in
+        return data.withUnsafeBytes { buffer in
             let ptr = buffer.bindMemory(to: UInt8.self).baseAddress!
 
             let pointCount = Int(ptr.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
