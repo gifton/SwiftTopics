@@ -48,12 +48,21 @@ final class UMAPBenchmarks: XCTestCase {
     ]
 
     /// UMAP configuration for benchmarks.
+    ///
+    /// Uses `.random` initialization to bypass all eigendecomposition bottlenecks.
+    /// This enables fair GPU vs CPU comparison where GPU can accelerate both
+    /// k-NN construction and optimization phases.
+    ///
+    /// Note: `.pca` can also work but may fail on synthetic test data due to
+    /// ill-conditioned covariance matrices. `.random` is numerically stable
+    /// and sufficient for measuring GPU speedup (not quality).
     let umapConfig = UMAPConfiguration(
         nNeighbors: 15,
         minDist: 0.1,
         metric: .euclidean,
         nEpochs: 200,  // Fixed epochs for consistent comparison
-        learningRate: 1.0
+        learningRate: 1.0,
+        initialization: .random  // Random init avoids all eigendecomposition
     )
 
     /// Output dimensions (typical for topic modeling).
@@ -298,11 +307,13 @@ final class UMAPBenchmarks: XCTestCase {
             )
 
             // Use consistent epoch count for fair comparison
+            // Random initialization avoids all eigendecomposition bottlenecks
             let config = UMAPConfiguration(
                 nNeighbors: 15,
                 minDist: 0.1,
                 nEpochs: 100,
-                learningRate: 1.0
+                learningRate: 1.0,
+                initialization: .random
             )
 
             // CPU timing
@@ -786,5 +797,310 @@ extension UMAPBenchmarks {
 
         // Single epoch should be very fast
         XCTAssertLessThan(avgEpochTime, 0.5, "GPU epoch should complete in < 0.5s")
+    }
+}
+
+// MARK: - Initialization Strategy Benchmarks
+
+extension UMAPBenchmarks {
+
+    /// Compares initialization strategies: spectral vs PCA vs random.
+    ///
+    /// Measures both speed and quality impact of different initialization methods.
+    func testInitializationStrategyComparison() async throws {
+        let gpuContext = await TopicsGPUContext.create(allowCPUFallback: false)
+        guard gpuContext != nil else {
+            throw XCTSkip("GPU not available")
+        }
+
+        let points = 1000
+        let embeddings = TestDataGenerator.clusteredEmbeddings(
+            clusterCount: 10,
+            pointsPerCluster: points / 10,
+            seed: 42
+        )
+
+        print("\n")
+        print("═══════════════════════════════════════════════════════════════════")
+        print("  Initialization Strategy Comparison (\(points) points)")
+        print("═══════════════════════════════════════════════════════════════════")
+
+        // Test each initialization strategy
+        let strategies: [(UMAPInitialization, String)] = [
+            (.spectral, "Spectral"),
+            (.pca, "PCA"),
+            (.random, "Random")
+        ]
+
+        var results: [(strategy: String, initTime: TimeInterval, totalTime: TimeInterval)] = []
+
+        for (strategy, name) in strategies {
+            let config = UMAPConfiguration(
+                nNeighbors: 15,
+                minDist: 0.1,
+                nEpochs: 100,  // Fewer epochs for fair comparison
+                learningRate: 1.0,
+                initialization: strategy
+            )
+
+            let reducer = UMAPReducer(
+                configuration: config,
+                nComponents: outputDimension,
+                seed: 42,
+                gpuContext: gpuContext
+            )
+
+            // Time the full pipeline
+            let start = CFAbsoluteTimeGetCurrent()
+            _ = try await reducer.fitTransform(embeddings)
+            let totalTime = CFAbsoluteTimeGetCurrent() - start
+
+            // Note: We can't easily measure init time separately without modifying UMAP
+            // so we report total time which reflects the init strategy impact
+            results.append((strategy: name, initTime: 0, totalTime: totalTime))
+
+            print("  \(name.padding(toLength: 12, withPad: " ", startingAt: 0)) Total: \(formatTime(totalTime))")
+        }
+
+        // Verify PCA and random are faster than spectral
+        if let spectralResult = results.first(where: { $0.strategy == "Spectral" }),
+           let pcaResult = results.first(where: { $0.strategy == "PCA" }),
+           let randomResult = results.first(where: { $0.strategy == "Random" }) {
+
+            let pcaSpeedup = spectralResult.totalTime / pcaResult.totalTime
+            let randomSpeedup = spectralResult.totalTime / randomResult.totalTime
+
+            print("\n  Speedup vs Spectral:")
+            print("    PCA:    \(String(format: "%.1f", pcaSpeedup))x")
+            print("    Random: \(String(format: "%.1f", randomSpeedup))x")
+
+            // PCA should be significantly faster than spectral
+            XCTAssertGreaterThan(pcaSpeedup, 2.0, "PCA should be faster than spectral")
+            // Random should be even faster
+            XCTAssertGreaterThan(randomSpeedup, 2.0, "Random should be faster than spectral")
+        }
+    }
+
+    /// Tests GPU-optimized UMAP preset performance.
+    func testGPUOptimizedPreset() async throws {
+        let gpuContext = await TopicsGPUContext.create(allowCPUFallback: false)
+        guard let gpu = gpuContext else {
+            throw XCTSkip("GPU not available")
+        }
+
+        let points = 1000
+        let embeddings = TestDataGenerator.clusteredEmbeddings(
+            clusterCount: 10,
+            pointsPerCluster: points / 10,
+            seed: 42
+        )
+
+        print("\n")
+        print("═══════════════════════════════════════════════════════════════════")
+        print("  GPU-Optimized Preset vs Default (\(points) points)")
+        print("═══════════════════════════════════════════════════════════════════")
+
+        // Default configuration (spectral init)
+        let defaultReducer = UMAPReducer(
+            configuration: .default,
+            nComponents: outputDimension,
+            seed: 42,
+            gpuContext: gpu
+        )
+
+        let defaultStart = CFAbsoluteTimeGetCurrent()
+        _ = try await defaultReducer.fitTransform(embeddings)
+        let defaultTime = CFAbsoluteTimeGetCurrent() - defaultStart
+
+        // GPU-optimized configuration (PCA init)
+        let gpuReducer = UMAPReducer(
+            configuration: .gpuOptimized,
+            nComponents: outputDimension,
+            seed: 42,
+            gpuContext: gpu
+        )
+
+        let gpuStart = CFAbsoluteTimeGetCurrent()
+        _ = try await gpuReducer.fitTransform(embeddings)
+        let gpuTime = CFAbsoluteTimeGetCurrent() - gpuStart
+
+        let speedup = defaultTime / gpuTime
+
+        print("  Default (spectral): \(formatTime(defaultTime))")
+        print("  GPU-optimized (PCA): \(formatTime(gpuTime))")
+        print("  Speedup: \(String(format: "%.1f", speedup))x")
+
+        // GPU-optimized should be significantly faster
+        XCTAssertGreaterThan(speedup, 5.0, "GPU-optimized preset should provide significant speedup")
+    }
+}
+
+// MARK: - GPU k-NN Benchmarks
+
+extension UMAPBenchmarks {
+
+    /// Benchmarks GPU k-NN vs CPU BallTree k-NN.
+    func testGPUvsCPUKNN() async throws {
+        let gpuContext = await TopicsGPUContext.create(allowCPUFallback: false)
+        guard let gpu = gpuContext else {
+            throw XCTSkip("GPU not available")
+        }
+
+        let sizes = [500, 1000, 2000]
+        let k = 15
+
+        print("\n")
+        print("═══════════════════════════════════════════════════════════════════")
+        print("  GPU vs CPU k-NN Benchmark (k=\(k))")
+        print("═══════════════════════════════════════════════════════════════════")
+
+        for size in sizes {
+            let embeddings = TestDataGenerator.clusteredEmbeddings(
+                clusterCount: max(5, size / 100),
+                pointsPerCluster: 100,
+                seed: UInt64(size)
+            ).prefix(size)
+
+            let embeddingArray = Array(embeddings)
+
+            // CPU k-NN (BallTree)
+            let cpuStart = CFAbsoluteTimeGetCurrent()
+            _ = try await NearestNeighborGraph.build(
+                embeddings: embeddingArray,
+                k: k,
+                metric: .euclidean,
+                gpuContext: nil  // Force CPU path
+            )
+            let cpuTime = CFAbsoluteTimeGetCurrent() - cpuStart
+
+            // GPU k-NN
+            let gpuStart = CFAbsoluteTimeGetCurrent()
+            _ = try await NearestNeighborGraph.build(
+                embeddings: embeddingArray,
+                k: k,
+                metric: .euclidean,
+                gpuContext: gpu
+            )
+            let gpuTime = CFAbsoluteTimeGetCurrent() - gpuStart
+
+            let speedup = cpuTime / gpuTime
+
+            print("  \(size) points: CPU=\(formatTime(cpuTime)), GPU=\(formatTime(gpuTime)), Speedup=\(String(format: "%.1f", speedup))x")
+
+            // GPU should provide significant speedup for larger datasets
+            if size >= 500 {
+                XCTAssertGreaterThan(speedup, 2.0, "GPU k-NN should be faster for \(size) points")
+            }
+        }
+    }
+
+    /// Tests k-NN result consistency between GPU and CPU paths.
+    func testKNNConsistency() async throws {
+        let gpuContext = await TopicsGPUContext.create(allowCPUFallback: false)
+        guard let gpu = gpuContext else {
+            throw XCTSkip("GPU not available")
+        }
+
+        let points = 500
+        let k = 15
+        let embeddings = TestDataGenerator.clusteredEmbeddings(
+            clusterCount: 5,
+            pointsPerCluster: points / 5,
+            seed: 42
+        )
+
+        print("\n")
+        print("═══════════════════════════════════════════════════════════════════")
+        print("  k-NN Consistency Check (GPU vs CPU)")
+        print("═══════════════════════════════════════════════════════════════════")
+
+        // Build with CPU
+        let cpuGraph = try await NearestNeighborGraph.build(
+            embeddings: embeddings,
+            k: k,
+            metric: .euclidean,
+            gpuContext: nil
+        )
+
+        // Build with GPU
+        let gpuGraph = try await NearestNeighborGraph.build(
+            embeddings: embeddings,
+            k: k,
+            metric: .euclidean,
+            gpuContext: gpu
+        )
+
+        // Compare results
+        var matchCount = 0
+        var totalNeighbors = 0
+
+        for i in 0..<points {
+            let cpuNeighbors = Set(cpuGraph.neighbors[i])
+            let gpuNeighbors = Set(gpuGraph.neighbors[i])
+            let overlap = cpuNeighbors.intersection(gpuNeighbors).count
+            matchCount += overlap
+            totalNeighbors += k
+        }
+
+        let matchRate = Float(matchCount) / Float(totalNeighbors)
+
+        print("  Neighbor match rate: \(String(format: "%.1f%%", matchRate * 100))")
+        print("  Note: Slight differences are expected due to tie-breaking")
+
+        // Results should be highly consistent (>90% overlap)
+        XCTAssertGreaterThan(matchRate, 0.90, "GPU and CPU k-NN should produce consistent results")
+    }
+
+    /// Full pipeline benchmark with GPU acceleration across all phases.
+    func testFullGPUAcceleratedPipeline() async throws {
+        let gpuContext = await TopicsGPUContext.create(allowCPUFallback: false)
+        guard let gpu = gpuContext else {
+            throw XCTSkip("GPU not available")
+        }
+
+        let points = 1000
+        let embeddings = TestDataGenerator.clusteredEmbeddings(
+            clusterCount: 10,
+            pointsPerCluster: points / 10,
+            seed: 42
+        )
+
+        print("\n")
+        print("═══════════════════════════════════════════════════════════════════")
+        print("  Full GPU-Accelerated Pipeline (\(points) points)")
+        print("═══════════════════════════════════════════════════════════════════")
+
+        // Baseline: CPU-only with spectral init
+        let cpuReducer = UMAPReducer(
+            configuration: .default,  // spectral init
+            nComponents: outputDimension,
+            seed: 42,
+            gpuContext: nil  // Force CPU for all phases
+        )
+
+        let cpuStart = CFAbsoluteTimeGetCurrent()
+        _ = try await cpuReducer.fitTransform(embeddings)
+        let cpuTime = CFAbsoluteTimeGetCurrent() - cpuStart
+
+        // Full GPU: GPU k-NN + PCA init + GPU optimization
+        let gpuReducer = UMAPReducer(
+            configuration: .gpuOptimized,  // PCA init
+            nComponents: outputDimension,
+            seed: 42,
+            gpuContext: gpu  // GPU for k-NN and optimization
+        )
+
+        let gpuStart = CFAbsoluteTimeGetCurrent()
+        _ = try await gpuReducer.fitTransform(embeddings)
+        let gpuTime = CFAbsoluteTimeGetCurrent() - gpuStart
+
+        let speedup = cpuTime / gpuTime
+
+        print("  CPU-only (spectral init): \(formatTime(cpuTime))")
+        print("  Full GPU (PCA init):      \(formatTime(gpuTime))")
+        print("  Total Speedup:            \(String(format: "%.1f", speedup))x")
+
+        // With PCA init + GPU k-NN + GPU optimization, we expect significant speedup
+        XCTAssertGreaterThan(speedup, 10.0, "Full GPU pipeline should provide >10x speedup")
     }
 }

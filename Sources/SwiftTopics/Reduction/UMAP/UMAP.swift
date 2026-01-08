@@ -106,6 +106,16 @@ public struct UMAPReducer: DimensionReducer, Sendable {
     ///   - nComponents: Output dimensionality (default: 15).
     ///   - seed: Random seed for reproducibility.
     ///   - gpuContext: Optional GPU context for acceleration.
+    ///
+    /// - Important: When using GPU acceleration, use `.gpuOptimized` instead of `.default`
+    ///   for full speedup. The default configuration uses spectral initialization which is
+    ///   O(n³) CPU-only and will bottleneck performance. Example:
+    ///   ```swift
+    ///   let reducer = UMAPReducer(
+    ///       configuration: .gpuOptimized,  // NOT .default
+    ///       gpuContext: gpuContext
+    ///   )
+    ///   ```
     public init(
         configuration: UMAPConfiguration = .default,
         nComponents: Int = 15,
@@ -128,6 +138,11 @@ public struct UMAPReducer: DimensionReducer, Sendable {
     ///   - nEpochs: Number of optimization epochs (nil = auto).
     ///   - seed: Random seed for reproducibility.
     ///   - gpuContext: Optional GPU context for acceleration.
+    ///   - initialization: Embedding initialization strategy. Use `.pca` or `.random`
+    ///     with GPU for best performance. Defaults to `.spectral` for backward compatibility.
+    ///
+    /// - Note: When providing `gpuContext`, consider using `.pca` initialization
+    ///   to avoid the O(n³) spectral embedding bottleneck.
     public init(
         nNeighbors: Int = 15,
         minDist: Float = 0.1,
@@ -135,14 +150,16 @@ public struct UMAPReducer: DimensionReducer, Sendable {
         metric: DistanceMetricType = .euclidean,
         nEpochs: Int? = nil,
         seed: UInt64? = nil,
-        gpuContext: TopicsGPUContext? = nil
+        gpuContext: TopicsGPUContext? = nil,
+        initialization: UMAPInitialization = .spectral
     ) {
         self.configuration = UMAPConfiguration(
             nNeighbors: nNeighbors,
             minDist: minDist,
             metric: metric,
             nEpochs: nEpochs,
-            learningRate: 1.0
+            learningRate: 1.0,
+            initialization: initialization
         )
         self._nComponents = nComponents
         self._seed = seed
@@ -188,6 +205,16 @@ public struct UMAPReducer: DimensionReducer, Sendable {
             throw ReductionError.emptyInput
         }
 
+        // Warn if GPU is provided but spectral initialization is used
+        // Spectral is O(n³) and CPU-only, negating most GPU benefits
+        if gpuContext != nil && configuration.initialization == .spectral {
+            umapLogger.warning("""
+                UMAP using spectral initialization with GPU context. \
+                Spectral embedding is O(n³) CPU-only and will bottleneck performance. \
+                For full GPU acceleration, use .gpuOptimized or set initialization to .pca or .random.
+                """)
+        }
+
         let n = embeddings.count
         let inputDimension = embeddings[0].dimension
 
@@ -207,29 +234,50 @@ public struct UMAPReducer: DimensionReducer, Sendable {
         // Convert distance metric
         let metric = convertMetric(configuration.metric)
 
-        // Step 1: Build k-NN graph
+        // Step 1: Build k-NN graph (GPU accelerated when gpuContext available)
         let knnGraph = try await NearestNeighborGraph.build(
             embeddings: embeddings,
             k: actualK,
-            metric: metric
+            metric: metric,
+            gpuContext: gpuContext
         )
 
         // Step 2: Construct fuzzy simplicial set
         let fuzzySet = FuzzySimplicialSet.build(from: knnGraph)
 
-        // Step 3: Initialize embedding
-        var initialEmbedding = try SpectralEmbedding.compute(
-            adjacency: fuzzySet.memberships,
-            nComponents: effectiveNComponents,
-            seed: effectiveSeed
-        )
+        // Step 3: Initialize embedding based on configuration
+        var initialEmbedding: [[Float]]
 
-        // Handle disconnected components
-        SpectralEmbedding.handleDisconnectedComponents(
-            embedding: &initialEmbedding,
-            graph: knnGraph,
-            seed: effectiveSeed
-        )
+        switch configuration.initialization {
+        case .spectral:
+            // O(n³) but best quality - use for small datasets
+            initialEmbedding = try SpectralEmbedding.compute(
+                adjacency: fuzzySet.memberships,
+                nComponents: effectiveNComponents,
+                seed: effectiveSeed
+            )
+            // Handle disconnected components for spectral init
+            SpectralEmbedding.handleDisconnectedComponents(
+                embedding: &initialEmbedding,
+                graph: knnGraph,
+                seed: effectiveSeed
+            )
+
+        case .pca:
+            // O(n×d²) - good balance of quality and speed
+            initialEmbedding = try await SpectralEmbedding.pcaInitialization(
+                embeddings: embeddings,
+                nComponents: effectiveNComponents
+            )
+
+        case .random:
+            // O(n) - fastest, may need more epochs
+            initialEmbedding = SpectralEmbedding.randomInitialization(
+                pointCount: n,
+                nComponents: effectiveNComponents,
+                seed: effectiveSeed
+            )
+        }
 
         // Step 4: Optimize (GPU or CPU)
         let nEpochs = configuration.nEpochs ?? computeAutoEpochs(n: n)
@@ -539,9 +587,17 @@ public struct UMAPBuilder: Sendable {
     private var learningRate: Float = 1.0
     private var seed: UInt64? = nil
     private var gpuContext: TopicsGPUContext? = nil
+    private var initialization: UMAPInitialization = .spectral
 
     /// Creates a new UMAP builder with default settings.
     public init() {}
+
+    /// Creates a UMAP builder optimized for GPU acceleration.
+    ///
+    /// Uses PCA initialization to bypass O(n³) spectral embedding.
+    public static func gpuOptimized() -> UMAPBuilder {
+        UMAPBuilder().initialization(.pca)
+    }
 
     /// Sets the number of neighbors.
     public func neighbors(_ k: Int) -> UMAPBuilder {
@@ -599,6 +655,21 @@ public struct UMAPBuilder: Sendable {
         return copy
     }
 
+    /// Sets the initialization strategy.
+    ///
+    /// - Parameter strategy: The initialization method to use.
+    /// - Returns: Updated builder.
+    ///
+    /// ## Performance Impact
+    /// - `.spectral`: Best quality, O(n³) - use for <500 points
+    /// - `.pca`: Good quality, O(n×d²) - recommended for GPU
+    /// - `.random`: Fast, O(n) - for large datasets or speed-critical cases
+    public func initialization(_ strategy: UMAPInitialization) -> UMAPBuilder {
+        var copy = self
+        copy.initialization = strategy
+        return copy
+    }
+
     /// Builds the UMAP reducer.
     public func build() -> UMAPReducer {
         let config = UMAPConfiguration(
@@ -606,7 +677,8 @@ public struct UMAPBuilder: Sendable {
             minDist: minDist,
             metric: metric,
             nEpochs: nEpochs,
-            learningRate: learningRate
+            learningRate: learningRate,
+            initialization: initialization
         )
         return UMAPReducer(
             configuration: config,
