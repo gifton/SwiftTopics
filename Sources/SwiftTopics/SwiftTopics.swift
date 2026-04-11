@@ -52,7 +52,7 @@ public enum SwiftTopics {
 /// ## GPU Acceleration
 ///
 /// Heavy operations use VectorAccelerate's Metal 4 kernels:
-/// - `L2DistanceKernel` - Pairwise distances
+/// - `BatchDistanceEngine` - Pairwise L2 / cosine distances
 /// - `FusedL2TopKKernel` - k-NN queries
 /// - `MatrixMultiplyKernel` - Covariance, PCA projection
 /// - `StatisticsKernel` - Mean centering

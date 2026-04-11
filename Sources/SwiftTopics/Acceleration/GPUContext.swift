@@ -33,6 +33,13 @@ public actor TopicsGPUContext {
     /// The underlying Metal 4 context.
     private var metal4Context: Metal4Context?
 
+    /// Cached batch-distance engine for pairwise / one-to-many distance workloads.
+    ///
+    /// Lazily created on first use and released in `cleanup()` alongside the
+    /// Metal4Context. `BatchDistanceEngine` wraps the Metal4Context's buffer pool
+    /// and pipelines, so creating one per call would defeat the pool.
+    private var batchEngine: BatchDistanceEngine?
+
     /// GPU health monitor for tracking failures and automatic CPU fallback.
     private var healthMonitor: GPUHealthMonitor?
 
@@ -126,6 +133,17 @@ public actor TopicsGPUContext {
         }
     }
 
+    /// Returns the cached batch distance engine, creating it on first use.
+    ///
+    /// Shared across `computePairwiseL2Distances` and `computePairwiseCosineSimilarity`
+    /// so that the underlying `BufferPool` and pipelines are reused between calls.
+    private func batchDistanceEngine(for context: Metal4Context) async throws -> BatchDistanceEngine {
+        if let existing = batchEngine { return existing }
+        let engine = try await BatchDistanceEngine(context: context)
+        batchEngine = engine
+        return engine
+    }
+
     // MARK: - Pairwise Distances
 
     /// Computes pairwise L2 distances between all embeddings.
@@ -147,12 +165,23 @@ public actor TopicsGPUContext {
                 }
 
                 let vectors = embeddings.map { $0.vector }
-                let kernel = try await L2DistanceKernel(context: context)
-                return try await kernel.compute(
-                    queries: vectors,
-                    database: vectors,
-                    computeSqrt: true
-                )
+                let engine = try await batchDistanceEngine(for: context)
+
+                // VectorAccelerate 0.4.x removed the single-dispatch pairwise
+                // kernels; the supported replacement is `BatchDistanceEngine`,
+                // which is one-query-vs-many. We build the N×N matrix row by
+                // row. Each row reuses the same candidates, so the engine's
+                // buffer pool amortizes allocation across iterations.
+                var matrix: [[Float]] = []
+                matrix.reserveCapacity(vectors.count)
+                for query in vectors {
+                    let row = try await engine.batchEuclideanDistance(
+                        query: query,
+                        candidates: vectors
+                    )
+                    matrix.append(row)
+                }
+                return matrix
             },
             cpuFallback: { [self] in
                 computePairwiseL2DistancesCPU(embeddings)
@@ -177,11 +206,22 @@ public actor TopicsGPUContext {
                 }
 
                 let vectors = embeddings.map { $0.vector }
-                let kernel = try await CosineSimilarityKernel(context: context)
-                return try await kernel.compute(
-                    queries: vectors,
-                    database: vectors
-                )
+                let engine = try await batchDistanceEngine(for: context)
+
+                // Same strategy as `computePairwiseL2Distances` above; see the
+                // comment there for the background. `batchCosineSimilarity`
+                // returns *similarity* values in [-1, 1] (1.0 on the diagonal),
+                // matching the semantics of the old `CosineSimilarityKernel`.
+                var matrix: [[Float]] = []
+                matrix.reserveCapacity(vectors.count)
+                for query in vectors {
+                    let row = try await engine.batchCosineSimilarity(
+                        query: query,
+                        candidates: vectors
+                    )
+                    matrix.append(row)
+                }
+                return matrix
             },
             cpuFallback: { [self] in
                 computePairwiseCosineSimilarityCPU(embeddings)
@@ -702,6 +742,11 @@ public actor TopicsGPUContext {
 
     /// Releases GPU resources.
     public func cleanup() async {
+        // Drop the batch engine first so it cannot outlive the Metal4Context.
+        // The engine holds a strong reference to the context's buffer pool; if
+        // it survived past `context.cleanup()` any in-flight operation would
+        // encounter torn-down Metal resources.
+        batchEngine = nil
         if let context = metal4Context {
             await context.cleanup()
         }
