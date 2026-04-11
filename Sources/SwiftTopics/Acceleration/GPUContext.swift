@@ -33,6 +33,9 @@ public actor TopicsGPUContext {
     /// The underlying Metal 4 context.
     private var metal4Context: Metal4Context?
 
+    /// GPU health monitor for tracking failures and automatic CPU fallback.
+    private var healthMonitor: GPUHealthMonitor?
+
     /// Whether GPU acceleration is available.
     public nonisolated var isAvailable: Bool {
         Metal4Context.isAvailable
@@ -47,6 +50,7 @@ public actor TopicsGPUContext {
     public init() async throws {
         self.configuration = .default
         self.metal4Context = try await Self.initializeContext(configuration: configuration)
+        self.healthMonitor = Self.createHealthMonitor(configuration: configuration)
     }
 
     /// Creates a GPU context with custom configuration.
@@ -55,6 +59,20 @@ public actor TopicsGPUContext {
     public init(configuration: TopicsGPUConfiguration) async throws {
         self.configuration = configuration
         self.metal4Context = try await Self.initializeContext(configuration: configuration)
+        self.healthMonitor = Self.createHealthMonitor(configuration: configuration)
+    }
+
+    /// Creates the health monitor based on configuration.
+    private static func createHealthMonitor(
+        configuration: TopicsGPUConfiguration
+    ) -> GPUHealthMonitor? {
+        guard configuration.enableHealthMonitoring else { return nil }
+
+        if let healthConfig = configuration.healthMonitorConfiguration {
+            return GPUHealthMonitor(configuration: healthConfig)
+        } else {
+            return GPUHealthMonitor()
+        }
     }
 
     /// Creates a GPU context that may gracefully degrade if GPU unavailable.
@@ -113,58 +131,70 @@ public actor TopicsGPUContext {
     /// Computes pairwise L2 distances between all embeddings.
     ///
     /// Given n embeddings of dimension d, returns an n×n distance matrix.
+    /// Uses GPU when available and healthy, with automatic CPU fallback.
     ///
     /// - Parameter embeddings: The embeddings to compute distances for.
     /// - Returns: 2D distance matrix [n][n].
     /// - Complexity: O(n² × d) computation.
     public func computePairwiseL2Distances(_ embeddings: [Embedding]) async throws -> [[Float]] {
-        guard let context = metal4Context else {
-            throw TopicsGPUError.gpuUnavailable
-        }
-
         guard !embeddings.isEmpty else { return [] }
 
-        // Convert to 2D array for VectorAccelerate API
-        let vectors = embeddings.map { $0.vector }
+        return try await executeWithHealthTracking(
+            operation: .pairwiseL2Distance,
+            gpu: { [self] in
+                guard let context = metal4Context else {
+                    throw TopicsGPUError.gpuUnavailable
+                }
 
-        // Use L2DistanceKernel from VectorAccelerate
-        let kernel = try await L2DistanceKernel(context: context)
-        let distances = try await kernel.compute(
-            queries: vectors,
-            database: vectors,
-            computeSqrt: true
+                let vectors = embeddings.map { $0.vector }
+                let kernel = try await L2DistanceKernel(context: context)
+                return try await kernel.compute(
+                    queries: vectors,
+                    database: vectors,
+                    computeSqrt: true
+                )
+            },
+            cpuFallback: { [self] in
+                computePairwiseL2DistancesCPU(embeddings)
+            }
         )
-
-        return distances
     }
 
     /// Computes pairwise cosine similarities between all embeddings.
     ///
+    /// Uses GPU when available and healthy, with automatic CPU fallback.
+    ///
     /// - Parameter embeddings: The embeddings to compute similarities for.
     /// - Returns: 2D similarity matrix [n][n].
     public func computePairwiseCosineSimilarity(_ embeddings: [Embedding]) async throws -> [[Float]] {
-        guard let context = metal4Context else {
-            throw TopicsGPUError.gpuUnavailable
-        }
-
         guard !embeddings.isEmpty else { return [] }
 
-        let vectors = embeddings.map { $0.vector }
+        return try await executeWithHealthTracking(
+            operation: .pairwiseCosineSimilarity,
+            gpu: { [self] in
+                guard let context = metal4Context else {
+                    throw TopicsGPUError.gpuUnavailable
+                }
 
-        let kernel = try await CosineSimilarityKernel(context: context)
-        let similarities = try await kernel.compute(
-            queries: vectors,
-            database: vectors
+                let vectors = embeddings.map { $0.vector }
+                let kernel = try await CosineSimilarityKernel(context: context)
+                return try await kernel.compute(
+                    queries: vectors,
+                    database: vectors
+                )
+            },
+            cpuFallback: { [self] in
+                computePairwiseCosineSimilarityCPU(embeddings)
+            }
         )
-
-        return similarities
     }
 
     // MARK: - K-Nearest Neighbors
 
-    /// Computes k-nearest neighbors for all embeddings using GPU.
+    /// Computes k-nearest neighbors for all embeddings.
     ///
-    /// Uses VectorAccelerate's `FusedL2TopKKernel` for efficient computation.
+    /// Uses VectorAccelerate's `FusedL2TopKKernel` for efficient GPU computation,
+    /// with automatic CPU fallback on GPU health issues.
     ///
     /// - Parameters:
     ///   - embeddings: The embeddings to find neighbors for.
@@ -174,27 +204,31 @@ public actor TopicsGPUContext {
         _ embeddings: [Embedding],
         k: Int
     ) async throws -> [[(index: Int, distance: Float)]] {
-        guard let context = metal4Context else {
-            throw TopicsGPUError.gpuUnavailable
-        }
-
         let n = embeddings.count
         guard n > 0 else { return [] }
         guard k > 0 && k <= n else {
             throw TopicsGPUError.invalidParameter("k must be between 1 and \(n)")
         }
 
-        let vectors = embeddings.map { $0.vector }
+        return try await executeWithHealthTracking(
+            operation: .batchKNN,
+            gpu: { [self] in
+                guard let context = metal4Context else {
+                    throw TopicsGPUError.gpuUnavailable
+                }
 
-        // Use FusedL2TopKKernel from VectorAccelerate
-        let kernel = try await FusedL2TopKKernel(context: context)
-        let results = try await kernel.findNearestNeighbors(
-            queries: vectors,
-            dataset: vectors,
-            k: k
+                let vectors = embeddings.map { $0.vector }
+                let kernel = try await FusedL2TopKKernel(context: context)
+                return try await kernel.findNearestNeighbors(
+                    queries: vectors,
+                    dataset: vectors,
+                    k: k
+                )
+            },
+            cpuFallback: { [self] in
+                computeBatchKNNCPU(embeddings, k: k)
+            }
         )
-
-        return results
     }
 
     /// Computes the k-th nearest neighbor distance for each embedding (core distance).
@@ -239,6 +273,11 @@ public actor TopicsGPUContext {
     /// | 1,000 points | ~150ms        |
     /// | 5,000 points | ~2s           |
     ///
+    /// ## Health Tracking
+    ///
+    /// This operation is tracked by the health monitor. On repeated failures,
+    /// the caller should fall back to CPU-based HDBSCAN.
+    ///
     /// - Parameters:
     ///   - embeddings: The embeddings to cluster.
     ///   - minSamples: The k value for core distance (typically HDBSCAN's minSamples).
@@ -248,32 +287,38 @@ public actor TopicsGPUContext {
         _ embeddings: [Embedding],
         minSamples: Int
     ) async throws -> GPUHDBSCANResult {
-        guard let context = metal4Context else {
-            throw TopicsGPUError.gpuUnavailable
-        }
+        return try await executeWithHealthTracking(
+            operation: .hdbscanMST,
+            gpu: { [self] in
+                guard let context = metal4Context else {
+                    throw TopicsGPUError.gpuUnavailable
+                }
 
-        let vectors = embeddings.map { $0.vector }
+                let vectors = embeddings.map { $0.vector }
 
-        let module = try await HDBSCANDistanceModule(context: context)
-        let result = try await module.computeMST(
-            embeddings: vectors,
-            minSamples: minSamples
-        )
+                let module = try await HDBSCANDistanceModule(context: context)
+                let result = try await module.computeMST(
+                    embeddings: vectors,
+                    minSamples: minSamples
+                )
 
-        // Convert VectorAccelerate MSTResult to SwiftTopics MinimumSpanningTree
-        let edges = result.mst.edges.map { edge in
-            MSTEdge(
-                source: edge.source,
-                target: edge.target,
-                weight: edge.weight
-            )
-        }
+                // Convert VectorAccelerate MSTResult to SwiftTopics MinimumSpanningTree
+                let edges = result.mst.edges.map { edge in
+                    MSTEdge(
+                        source: edge.source,
+                        target: edge.target,
+                        weight: edge.weight
+                    )
+                }
 
-        let mst = MinimumSpanningTree(edges: edges, pointCount: embeddings.count)
+                let mst = MinimumSpanningTree(edges: edges, pointCount: embeddings.count)
 
-        return GPUHDBSCANResult(
-            coreDistances: result.coreDistances,
-            mst: mst
+                return GPUHDBSCANResult(
+                    coreDistances: result.coreDistances,
+                    mst: mst
+                )
+            },
+            cpuFallback: nil  // CPU fallback handled at HDBSCAN level
         )
     }
 
@@ -435,21 +480,222 @@ public actor TopicsGPUContext {
 
     /// L2-normalizes embeddings.
     ///
+    /// Uses GPU when available and healthy, with automatic CPU fallback.
+    ///
     /// - Parameter embeddings: The embeddings to normalize.
     /// - Returns: Normalized embeddings (unit length).
     public func normalizeL2(_ embeddings: [Embedding]) async throws -> [Embedding] {
-        guard let context = metal4Context else {
-            throw TopicsGPUError.gpuUnavailable
-        }
-
         guard !embeddings.isEmpty else { return [] }
 
-        let vectors = embeddings.map { $0.vector }
+        return try await executeWithHealthTracking(
+            operation: .normalization,
+            gpu: { [self] in
+                guard let context = metal4Context else {
+                    throw TopicsGPUError.gpuUnavailable
+                }
 
-        let kernel = try await L2NormalizationKernel(context: context)
-        let result = try await kernel.normalize(vectors)
+                let vectors = embeddings.map { $0.vector }
+                let kernel = try await L2NormalizationKernel(context: context)
+                let result = try await kernel.normalize(vectors)
+                return result.asArrays().map { Embedding(vector: $0) }
+            },
+            cpuFallback: { [self] in
+                normalizeL2CPU(embeddings)
+            }
+        )
+    }
 
-        return result.asArrays().map { Embedding(vector: $0) }
+    // MARK: - Health Monitoring
+
+    /// Operation identifiers for health tracking.
+    private enum GPUOperationID: String {
+        case pairwiseL2Distance = "pairwise_l2_distance"
+        case pairwiseCosineSimilarity = "pairwise_cosine_similarity"
+        case batchKNN = "batch_knn"
+        case coreDistances = "core_distances"
+        case hdbscanMST = "hdbscan_mst"
+        case covariance = "covariance_matrix"
+        case projection = "projection"
+        case normalization = "normalization"
+        case umapGradient = "umap_gradient"
+    }
+
+    /// Executes a GPU operation with health tracking and optional CPU fallback.
+    ///
+    /// This wrapper:
+    /// 1. Checks if CPU fallback should be used due to GPU health issues
+    /// 2. Executes the GPU operation
+    /// 3. Records success/failure for health tracking
+    /// 4. Falls back to CPU if GPU fails and fallback is available
+    ///
+    /// - Parameters:
+    ///   - operation: The operation identifier for tracking.
+    ///   - gpu: The GPU operation to execute.
+    ///   - cpuFallback: Optional CPU fallback implementation.
+    /// - Returns: The result of either GPU or CPU operation.
+    private func executeWithHealthTracking<T>(
+        operation: GPUOperationID,
+        gpu: () async throws -> T,
+        cpuFallback: (() async throws -> T)? = nil
+    ) async throws -> T {
+        // Check if we should skip GPU due to health issues
+        if let monitor = healthMonitor,
+           await monitor.shouldFallbackToCPU(operation: operation.rawValue),
+           let fallback = cpuFallback {
+            return try await fallback()
+        }
+
+        do {
+            let result = try await gpu()
+            // Record success
+            await healthMonitor?.recordSuccess(operation: operation.rawValue)
+            return result
+        } catch {
+            // Record failure
+            await healthMonitor?.recordFailure(operation: operation.rawValue, error: error)
+
+            // Try CPU fallback if available
+            if let fallback = cpuFallback {
+                return try await fallback()
+            }
+
+            throw error
+        }
+    }
+
+    /// Returns the current GPU health status.
+    ///
+    /// This provides visibility into:
+    /// - Whether the GPU is healthy
+    /// - Per-operation failure counts and degradation levels
+    /// - Disabled operations that have fallen back to CPU
+    ///
+    /// - Returns: Health status, or nil if health monitoring is disabled.
+    public func getHealthStatus() async -> GPUHealthStatus? {
+        await healthMonitor?.getHealthStatus()
+    }
+
+    /// Resets all GPU health tracking state.
+    ///
+    /// This clears failure counts and re-enables any disabled operations.
+    /// Use when you know GPU issues have been resolved.
+    public func resetHealthStatus() async {
+        await healthMonitor?.reset()
+    }
+
+    /// Checks if the GPU is currently healthy.
+    ///
+    /// - Returns: `true` if healthy or monitoring disabled, `false` if degraded.
+    public func isGPUHealthy() async -> Bool {
+        guard let monitor = healthMonitor else { return true }
+        return await monitor.isHealthy()
+    }
+
+    // MARK: - CPU Fallback Implementations
+
+    /// CPU fallback for pairwise L2 distance computation.
+    private func computePairwiseL2DistancesCPU(_ embeddings: [Embedding]) -> [[Float]] {
+        let n = embeddings.count
+        guard n > 0 else { return [] }
+
+        var distances = [[Float]](repeating: [Float](repeating: 0, count: n), count: n)
+        let d = embeddings[0].dimension
+
+        for i in 0..<n {
+            for j in (i + 1)..<n {
+                var sum: Float = 0
+                for k in 0..<d {
+                    let diff = embeddings[i].vector[k] - embeddings[j].vector[k]
+                    sum += diff * diff
+                }
+                let dist = sqrt(sum)
+                distances[i][j] = dist
+                distances[j][i] = dist
+            }
+        }
+
+        return distances
+    }
+
+    /// CPU fallback for pairwise cosine similarity computation.
+    private func computePairwiseCosineSimilarityCPU(_ embeddings: [Embedding]) -> [[Float]] {
+        let n = embeddings.count
+        guard n > 0 else { return [] }
+
+        var similarities = [[Float]](repeating: [Float](repeating: 0, count: n), count: n)
+        let d = embeddings[0].dimension
+
+        // Precompute norms
+        var norms = [Float](repeating: 0, count: n)
+        for i in 0..<n {
+            var normSq: Float = 0
+            for k in 0..<d {
+                normSq += embeddings[i].vector[k] * embeddings[i].vector[k]
+            }
+            norms[i] = sqrt(normSq)
+        }
+
+        // Compute similarities
+        for i in 0..<n {
+            similarities[i][i] = 1.0  // Self-similarity
+            for j in (i + 1)..<n {
+                var dot: Float = 0
+                for k in 0..<d {
+                    dot += embeddings[i].vector[k] * embeddings[j].vector[k]
+                }
+                let sim = (norms[i] > 0 && norms[j] > 0) ? dot / (norms[i] * norms[j]) : 0
+                similarities[i][j] = sim
+                similarities[j][i] = sim
+            }
+        }
+
+        return similarities
+    }
+
+    /// CPU fallback for batch k-NN computation.
+    private func computeBatchKNNCPU(
+        _ embeddings: [Embedding],
+        k: Int
+    ) -> [[(index: Int, distance: Float)]] {
+        let n = embeddings.count
+        guard n > 0 else { return [] }
+        let d = embeddings[0].dimension
+
+        var results = [[(index: Int, distance: Float)]](repeating: [], count: n)
+
+        for i in 0..<n {
+            // Compute distances to all other points
+            var distances: [(index: Int, distance: Float)] = []
+            for j in 0..<n {
+                var sum: Float = 0
+                for dim in 0..<d {
+                    let diff = embeddings[i].vector[dim] - embeddings[j].vector[dim]
+                    sum += diff * diff
+                }
+                distances.append((index: j, distance: sqrt(sum)))
+            }
+
+            // Sort and take top k
+            distances.sort { $0.distance < $1.distance }
+            results[i] = Array(distances.prefix(k))
+        }
+
+        return results
+    }
+
+    /// CPU fallback for L2 normalization.
+    private func normalizeL2CPU(_ embeddings: [Embedding]) -> [Embedding] {
+        embeddings.map { embedding in
+            var normSq: Float = 0
+            for val in embedding.vector {
+                normSq += val * val
+            }
+            let norm = sqrt(normSq)
+            guard norm > 0 else { return embedding }
+
+            let normalized = embedding.vector.map { $0 / norm }
+            return Embedding(vector: normalized)
+        }
     }
 
     // MARK: - Cleanup
@@ -508,6 +754,18 @@ public struct TopicsGPUConfiguration: Sendable {
     /// - **> 1000 points**: GPU provides 10-50x speedup
     public let gpuMinPointsThreshold: Int
 
+    /// Whether to enable GPU health monitoring with automatic CPU fallback.
+    ///
+    /// When enabled, the GPU context tracks consecutive failures per operation
+    /// and automatically falls back to CPU implementations when GPU operations
+    /// fail repeatedly.
+    public let enableHealthMonitoring: Bool
+
+    /// Configuration for the health monitor (when enabled).
+    ///
+    /// Controls how failures are tracked and when CPU fallback is triggered.
+    public let healthMonitorConfiguration: GPUHealthMonitorConfiguration?
+
     /// Creates GPU configuration.
     ///
     /// - Parameters:
@@ -515,16 +773,22 @@ public struct TopicsGPUConfiguration: Sendable {
     ///   - maxBufferPoolMemory: Maximum memory for buffer pool (bytes).
     ///   - enableProfiling: Enable performance profiling.
     ///   - gpuMinPointsThreshold: Minimum points to use GPU (default: 100).
+    ///   - enableHealthMonitoring: Enable GPU health monitoring (default: true).
+    ///   - healthMonitorConfiguration: Custom health monitor config (default: .default).
     public init(
         preferHighPerformance: Bool = true,
         maxBufferPoolMemory: Int? = nil,
         enableProfiling: Bool = false,
-        gpuMinPointsThreshold: Int = 100
+        gpuMinPointsThreshold: Int = 100,
+        enableHealthMonitoring: Bool = true,
+        healthMonitorConfiguration: GPUHealthMonitorConfiguration? = nil
     ) {
         self.preferHighPerformance = preferHighPerformance
         self.maxBufferPoolMemory = maxBufferPoolMemory
         self.enableProfiling = enableProfiling
         self.gpuMinPointsThreshold = max(1, gpuMinPointsThreshold)
+        self.enableHealthMonitoring = enableHealthMonitoring
+        self.healthMonitorConfiguration = healthMonitorConfiguration
     }
 
     /// Default configuration.
@@ -548,6 +812,15 @@ public struct TopicsGPUConfiguration: Sendable {
     public static let smallDataset = TopicsGPUConfiguration(
         preferHighPerformance: true,
         gpuMinPointsThreshold: 50
+    )
+
+    /// Configuration with aggressive health monitoring for production.
+    ///
+    /// Uses aggressive settings that quickly fall back to CPU on GPU issues.
+    public static let production = TopicsGPUConfiguration(
+        preferHighPerformance: true,
+        enableHealthMonitoring: true,
+        healthMonitorConfiguration: .aggressive
     )
 }
 

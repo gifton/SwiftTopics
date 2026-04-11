@@ -145,7 +145,7 @@ public struct CTFIDFConfiguration: RepresentationConfiguration {
     public init(
         keywordsPerTopic: Int = 10,
         minDocumentFrequency: Int = 1,
-        maxDocumentFrequencyRatio: Float = 0.95,
+        maxDocumentFrequencyRatio: Float = 0.70,
         minTermLength: Int = 2,
         useBigrams: Bool = false,
         customStopWords: [String] = [],

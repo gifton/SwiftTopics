@@ -250,15 +250,44 @@ public enum EnglishStopWords {
         "serve", "served", "serving", "die", "died", "dying",
         "send", "sent", "sending", "expect", "expected", "expecting",
         "build", "built", "building", "stay", "stayed", "staying",
+        "put", "putting", "start", "started", "starting",
+        "turn", "turned", "turning", "hold", "held", "holding",
+        "look", "looked", "looking", "ask", "asked", "asking",
+        "mean", "meant", "meaning", "help", "helped", "helping",
+        "talk", "talked", "talking", "end", "ended", "ending",
+        "pick", "picked", "picking", "pull", "pulled", "pulling",
+        "push", "pushed", "pushing", "reach", "reached", "reaching",
+        "pass", "passed", "passing", "raise", "raised", "raising",
+        "rest", "rested", "resting", "wear", "wore", "worn", "wearing",
+        "hang", "hung", "hanging", "draw", "drew", "drawn", "drawing",
+        "carry", "carried", "carrying", "fall", "fell", "fallen", "falling",
+        "cut", "cutting", "hit", "hitting", "break", "broke", "broken", "breaking",
+        "drive", "drove", "driven", "driving", "eat", "ate", "eaten", "eating",
+        "drink", "drank", "drunk", "drinking", "sleep", "slept", "sleeping",
+        "wake", "woke", "woken", "waking", "rise", "rose", "risen", "rising",
+        "catch", "caught", "catching", "throw", "threw", "thrown", "throwing",
+        "drop", "dropped", "dropping", "fill", "filled", "filling",
+        "wish", "wished", "wishing", "wonder", "wondered", "wondering",
+        "realize", "realized", "realizing", "notice", "noticed", "noticing",
+        "decide", "decided", "deciding", "mention", "mentioned", "mentioning",
+        "enjoy", "enjoyed", "enjoying", "explain", "explained", "explaining",
         // Common adverbs
         "already", "always", "never", "often", "still", "ever", "even",
         "really", "actually", "probably", "certainly", "definitely",
         "almost", "enough", "quite", "rather", "well", "much",
         "yet", "usually", "sometimes", "maybe", "perhaps",
+        "basically", "honestly", "literally", "especially", "generally",
+        "apparently", "obviously", "simply", "mostly", "mainly",
+        "completely", "absolutely", "exactly", "entirely", "totally",
+        "slightly", "particularly", "specifically", "eventually", "finally",
+        "recently", "currently", "suddenly", "quickly", "slowly",
         // Common adjectives
         "new", "old", "good", "bad", "great", "little", "big", "small",
         "long", "short", "high", "low", "right", "wrong", "first", "last",
         "next", "different", "important", "many", "few", "several",
+        "whole", "real", "sure", "able", "hard", "easy", "best", "worst",
+        "nice", "fine", "full", "clear", "true", "early", "late",
+        "possible", "likely", "certain", "better", "worse",
         // Numbers as words
         "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
         // Other
@@ -266,7 +295,40 @@ public enum EnglishStopWords {
         "someone", "anyone", "everyone", "nobody", "anybody", "everybody",
         "place", "places", "time", "times", "day", "days", "year", "years",
         "people", "person", "part", "parts", "case", "cases", "point", "points",
-        "fact", "facts", "example", "examples", "number", "numbers"
+        "fact", "facts", "example", "examples", "number", "numbers",
+        "lot", "lots", "kind", "sort", "bit", "stuff", "type",
+        "sense", "idea", "mind", "hand", "hands", "head", "face",
+        "side", "room", "home", "house", "world", "life",
+        "moment", "today", "tonight", "yesterday", "tomorrow", "morning",
+        "afternoon", "evening", "night", "week", "weeks", "month", "months",
+        "ago", "later", "though", "although", "however", "anyway", "instead",
+        "across", "along", "around", "away", "back", "around"
+    ])
+
+    /// Journal-specific stop words for personal writing contexts.
+    ///
+    /// These words are extremely common in diary/journal entries but carry
+    /// no topical signal. Union with `.extended` for journal topic extraction.
+    public static let journal: Set<String> = extended.union([
+        // Journaling meta-language
+        "entry", "journal", "journaling", "wrote", "writing", "write",
+        "reflect", "reflecting", "reflection", "note", "notes", "noted",
+        "record", "recorded", "recording", "log", "logged", "logging",
+        "page", "pages", "draft", "drafts",
+        // Self-referential (common in first-person writing)
+        "myself", "gonna", "gotta", "wanna", "kinda", "sorta",
+        "okay", "yeah", "yep", "nope", "hmm", "huh", "wow",
+        "maybe", "probably", "guess", "suppose", "figured",
+        "pretty", "quite", "super", "totally",
+        // Temporal filler in journals
+        "lately", "recently", "soon", "awhile", "sometimes", "whenever",
+        // Fitness/routine journaling
+        "reps", "sets", "mins", "minutes", "hours",
+        "workout", "session", "routine",
+        // Emotional hedging (common in self-reflection, not topically meaningful)
+        "somehow", "somewhat", "whatever", "wherever", "whenever",
+        "everything", "anything", "nothing", "something",
+        "everyone", "anyone", "someone", "nobody"
     ])
 }
 

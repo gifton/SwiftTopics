@@ -55,7 +55,9 @@ public struct CTFIDFRepresenter: TopicRepresenter, Sendable {
         self.configuration = configuration
 
         // Build tokenizer from configuration
-        var stopWords = EnglishStopWords.standard
+        // Use extended stopwords to filter common verbs, adverbs, and adjectives
+        // that aren't meaningful topic keywords (e.g. "felt", "said", "still", "like")
+        var stopWords = EnglishStopWords.extended
         stopWords.formUnion(configuration.customStopWords)
 
         self.tokenizer = Tokenizer(configuration: TokenizerConfiguration(
