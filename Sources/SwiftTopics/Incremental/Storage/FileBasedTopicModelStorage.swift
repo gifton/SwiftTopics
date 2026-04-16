@@ -178,9 +178,8 @@ public actor FileBasedTopicModelStorage: TopicModelStorage {
             index.documentIDs.append(docID)
 
             // Append embedding bytes
-            for value in embedding.vector {
-                var v = value
-                binaryData.append(Data(bytes: &v, count: MemoryLayout<Float>.size))
+            embedding.vector.withUnsafeBytes { rawBuffer in
+                binaryData.append(contentsOf: rawBuffer)
             }
 
             currentOffset += dimension * MemoryLayout<Float>.size
@@ -261,8 +260,9 @@ public actor FileBasedTopicModelStorage: TopicModelStorage {
                 )
             }
 
-            let vector = data.withUnsafeBytes { buffer -> [Float] in
-                Array(buffer.bindMemory(to: Float.self))
+            var vector = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+            vector.withUnsafeMutableBytes { dest in
+                _ = data.copyBytes(to: dest)
             }
 
             let embedding = Embedding(vector: vector)
@@ -309,9 +309,8 @@ public actor FileBasedTopicModelStorage: TopicModelStorage {
             index.offsets[docID] = currentOffset
             index.documentIDs.append(docID)
 
-            for value in vector {
-                var v = value
-                binaryData.append(Data(bytes: &v, count: MemoryLayout<Float>.size))
+            vector.withUnsafeBytes { rawBuffer in
+                binaryData.append(contentsOf: rawBuffer)
             }
 
             currentOffset += dimension * MemoryLayout<Float>.size
@@ -360,8 +359,9 @@ public actor FileBasedTopicModelStorage: TopicModelStorage {
                 continue
             }
 
-            let vector = data.withUnsafeBytes { buffer -> [Float] in
-                Array(buffer.bindMemory(to: Float.self))
+            var vector = [Float](repeating: 0, count: data.count / MemoryLayout<Float>.size)
+            vector.withUnsafeMutableBytes { dest in
+                _ = data.copyBytes(to: dest)
             }
 
             result.append((docID, vector))

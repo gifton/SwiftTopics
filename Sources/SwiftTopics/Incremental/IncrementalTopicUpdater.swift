@@ -121,11 +121,6 @@ public actor IncrementalTopicUpdater {
     /// Merger for combining mini-models with main model.
     private let merger: ModelMerger
 
-    /// Flag to signal training cancellation.
-    /// Marked nonisolated(unsafe) because it's read from Sendable closures.
-    /// Writes only happen from within the actor.
-    private nonisolated(unsafe) var shouldContinueTraining: Bool = true
-
     /// Background training task (if running).
     private var backgroundTrainingTask: Task<Void, Error>?
 
@@ -231,7 +226,9 @@ public actor IncrementalTopicUpdater {
             // Check if micro-retrain threshold reached
             let bufferCount = try await storage.pendingBufferCount()
             if bufferCount >= updateConfiguration.microRetrainThreshold && !isTraining {
-                // Trigger background micro-retrain
+                // Claim training flag synchronously before yielding to avoid reentrancy races
+                isTraining = true
+                // Trigger background micro-retrain (will reset flag inside)
                 triggerBackgroundMicroRetrain()
             }
 
@@ -241,6 +238,8 @@ public actor IncrementalTopicUpdater {
             let bufferCount = try await storage.pendingBufferCount()
 
             if bufferCount >= updateConfiguration.coldStartThreshold && !isTraining {
+                // Claim training flag synchronously before yielding to avoid reentrancy races
+                isTraining = true
                 // Trigger initial training (blocking for first model)
                 try await runInitialTraining()
 
@@ -318,9 +317,12 @@ public actor IncrementalTopicUpdater {
     /// This is a long-running operation (~15-60s for 1000 docs).
     /// Should be called from background processing context.
     ///
-    /// - Parameter progress: Optional progress callback.
+    /// - Parameters:
+    ///   - documentProvider: A closure to provide real document content for the IDs being trained.
+    ///   - progress: Optional progress callback.
     /// - Throws: `IncrementalUpdateError` on failure.
     public func triggerFullRefresh(
+        documentProvider: @escaping @Sendable ([DocumentID]) async throws -> [DocumentID: Document],
         progress: (@Sendable (TrainingProgress) async -> Void)? = nil
     ) async throws {
         guard !isTraining else {
@@ -328,14 +330,13 @@ public actor IncrementalTopicUpdater {
             return
         }
 
-        try await runFullRefresh(progress: progress)
+        try await runFullRefresh(documentProvider: documentProvider, progress: progress)
     }
 
     /// Cancels any in-progress training.
     ///
     /// Training will checkpoint and stop at next opportunity.
     public func cancelTraining() {
-        shouldContinueTraining = false
         backgroundTrainingTask?.cancel()
     }
 
@@ -345,10 +346,13 @@ public actor IncrementalTopicUpdater {
     ///
     /// Call this on app launch to continue any interrupted training.
     ///
+    /// - Parameter documentProvider: Optional provider to load full documents by ID. Required if resuming a full refresh.
     /// - Returns: True if training was resumed, false if no checkpoint.
     /// - Throws: `IncrementalUpdateError` on failure.
     @discardableResult
-    public func resumeIfNeeded() async throws -> Bool {
+    public func resumeIfNeeded(
+        documentProvider: (@Sendable ([DocumentID]) async throws -> [DocumentID: Document])? = nil
+    ) async throws -> Bool {
         guard let checkpoint = try await storage.loadCheckpoint() else {
             return false
         }
@@ -363,30 +367,36 @@ public actor IncrementalTopicUpdater {
         let documentIDs = checkpoint.documentIDs
         let embeddings = try await storage.loadEmbeddings(for: documentIDs)
 
-        // We need documents for training - create placeholder documents
-        // In a real implementation, you'd load the full documents from storage
+        // Load real documents if provider is available, otherwise use placeholders
+        let docMap: [DocumentID: Document]
+        if let provider = documentProvider {
+            docMap = (try? await provider(documentIDs)) ?? [:]
+        } else {
+            docMap = [:]
+        }
+
         let documents = documentIDs.enumerated().map { index, id in
-            Document(id: id, content: "")  // Placeholder - content from buffer
+            docMap[id] ?? Document(id: id, content: "")
         }
 
         isTraining = true
-        shouldContinueTraining = true
 
         defer { isTraining = false }
 
-        let result = try await trainingRunner.resumeTraining(
-            from: checkpoint,
-            documents: documents,
-            embeddings: embeddings,
-            configuration: modelConfiguration,
-            shouldContinue: { [weak self] in
-                self?.shouldContinueTraining ?? false
-            }
-        )
+        do {
+            let result = try await trainingRunner.resumeTraining(
+                from: checkpoint,
+                documents: documents,
+                embeddings: embeddings,
+                configuration: modelConfiguration
+            )
 
-        if result.isComplete, let state = result.state {
-            self.modelState = state
-            try await storage.saveModelState(state)
+            if result.isComplete, let state = result.state {
+                self.modelState = state
+                try await storage.saveModelState(state)
+            }
+        } catch is CancellationError {
+            return true
         }
 
         return true
@@ -544,12 +554,21 @@ public actor IncrementalTopicUpdater {
 
     /// Triggers background micro-retrain.
     private func triggerBackgroundMicroRetrain() {
+        // Assumes caller has set isTraining = true to claim training lock
         backgroundTrainingTask = Task {
             do {
-                try await self.triggerMicroRetrain()
+                // Drain buffer and run micro-retrain directly under claimed lock
+                let bufferedEntries = try await self.storage.drainPendingBuffer()
+                if !bufferedEntries.isEmpty {
+                    try await self.runMicroRetrain(bufferedEntries: bufferedEntries)
+                } else {
+                    // Nothing to train; release the lock
+                    self.isTraining = false
+                }
             } catch {
-                // Log error but don't propagate - this is background work
-                // In production, you'd want proper error reporting
+                // Release the lock on failure
+                self.isTraining = false
+                // Swallow in background; production code could log
             }
         }
     }
@@ -565,7 +584,6 @@ public actor IncrementalTopicUpdater {
         }
 
         isTraining = true
-        shouldContinueTraining = true
 
         defer { isTraining = false }
 
@@ -575,24 +593,32 @@ public actor IncrementalTopicUpdater {
         }
         let embeddings = bufferedEntries.map(\.embedding)
 
-        let result = try await trainingRunner.runTraining(
-            documents: documents,
-            embeddings: embeddings,
-            configuration: modelConfiguration,
-            type: .fullRefresh,
-            shouldContinue: { [weak self] in
-                self?.shouldContinueTraining ?? false
-            }
-        )
-
-        if result.isComplete, let state = result.state {
-            self.modelState = state
-            try await storage.saveModelState(state)
-        } else if let checkpoint = result.checkpoint {
-            throw IncrementalUpdateError.trainingInterrupted(
-                phase: checkpoint.currentPhase,
-                progress: checkpoint.overallProgress
+        do {
+            let result = try await trainingRunner.runTraining(
+                documents: documents,
+                embeddings: embeddings,
+                configuration: modelConfiguration,
+                type: .fullRefresh
             )
+
+            if result.isComplete, let state = result.state {
+                self.modelState = state
+                try await storage.saveModelState(state)
+            } else if let checkpoint = result.checkpoint {
+                throw IncrementalUpdateError.trainingInterrupted(
+                    phase: checkpoint.currentPhase,
+                    progress: checkpoint.overallProgress
+                )
+            }
+        } catch is CancellationError {
+            try await storage.appendToPendingBuffer(bufferedEntries)
+            if let checkpoint = try await storage.loadCheckpoint() {
+                throw IncrementalUpdateError.trainingInterrupted(
+                    phase: checkpoint.currentPhase,
+                    progress: checkpoint.overallProgress
+                )
+            }
+            throw CancellationError()
         }
     }
 
@@ -603,7 +629,6 @@ public actor IncrementalTopicUpdater {
         }
 
         isTraining = true
-        shouldContinueTraining = true
 
         defer { isTraining = false }
 
@@ -614,15 +639,26 @@ public actor IncrementalTopicUpdater {
         let embeddings = bufferedEntries.map(\.embedding)
 
         // Run training on just the new documents
-        let trainingResult = try await trainingRunner.runTraining(
-            documents: documents,
-            embeddings: embeddings,
-            configuration: modelConfiguration,
-            type: .microRetrain,
-            shouldContinue: { [weak self] in
-                self?.shouldContinueTraining ?? false
+        let trainingResult: InterruptibleTrainingRunner.TrainingResult
+        do {
+            trainingResult = try await trainingRunner.runTraining(
+                documents: documents,
+                embeddings: embeddings,
+                configuration: modelConfiguration,
+                type: .microRetrain
+            )
+        } catch is CancellationError {
+            // Training interrupted - entries already removed from buffer
+            // Put them back for next attempt
+            try await storage.appendToPendingBuffer(bufferedEntries)
+            if let checkpoint = try await storage.loadCheckpoint() {
+                throw IncrementalUpdateError.trainingInterrupted(
+                    phase: checkpoint.currentPhase,
+                    progress: checkpoint.overallProgress
+                )
             }
-        )
+            throw CancellationError()
+        }
 
         guard trainingResult.isComplete, let miniState = trainingResult.state else {
             // Training interrupted - entries already removed from buffer
@@ -673,10 +709,10 @@ public actor IncrementalTopicUpdater {
 
     /// Runs full refresh on all documents.
     private func runFullRefresh(
+        documentProvider: @escaping @Sendable ([DocumentID]) async throws -> [DocumentID: Document],
         progress: (@Sendable (TrainingProgress) async -> Void)?
     ) async throws {
         isTraining = true
-        shouldContinueTraining = true
 
         defer { isTraining = false }
 
@@ -690,42 +726,50 @@ public actor IncrementalTopicUpdater {
             )
         }
 
-        // We need document content for c-TF-IDF
-        // In a real implementation, you'd have a way to load document content
-        // For now, create placeholder documents
-        let documents = allEmbeddings.map { id, _ in
-            Document(id: id, content: "")  // Placeholder
+        // Load real document content
+        let ids = allEmbeddings.map(\.0)
+        let docMap = try await documentProvider(ids)
+
+        let documents = ids.map { id in
+            docMap[id] ?? Document(id: id, content: "")
         }
         let embeddings = allEmbeddings.map(\.1)
 
-        let result = try await trainingRunner.runTraining(
-            documents: documents,
-            embeddings: embeddings,
-            configuration: modelConfiguration,
-            type: .fullRefresh,
-            shouldContinue: { [weak self] in
-                self?.shouldContinueTraining ?? false
-            },
-            onProgress: progress
-        )
-
-        if result.isComplete, let state = result.state {
-            // For full refresh, update the state with proper metadata
-            let updatedState = state.afterFullRefresh(
-                topics: state.topics,
-                assignments: state.assignments,
-                centroids: state.centroids,
-                vocabulary: state.vocabulary,
-                documentCount: allEmbeddings.count
+        do {
+            let result = try await trainingRunner.runTraining(
+                documents: documents,
+                embeddings: embeddings,
+                configuration: modelConfiguration,
+                type: .fullRefresh,
+                onProgress: progress
             )
 
-            self.modelState = updatedState
-            try await storage.saveModelState(updatedState)
-        } else if let checkpoint = result.checkpoint {
-            throw IncrementalUpdateError.trainingInterrupted(
-                phase: checkpoint.currentPhase,
-                progress: checkpoint.overallProgress
-            )
+            if result.isComplete, let state = result.state {
+                // For full refresh, update the state with proper metadata
+                let updatedState = state.afterFullRefresh(
+                    topics: state.topics,
+                    assignments: state.assignments,
+                    centroids: state.centroids,
+                    vocabulary: state.vocabulary,
+                    documentCount: allEmbeddings.count
+                )
+
+                self.modelState = updatedState
+                try await storage.saveModelState(updatedState)
+            } else if let checkpoint = result.checkpoint {
+                throw IncrementalUpdateError.trainingInterrupted(
+                    phase: checkpoint.currentPhase,
+                    progress: checkpoint.overallProgress
+                )
+            }
+        } catch is CancellationError {
+            if let checkpoint = try await storage.loadCheckpoint() {
+                throw IncrementalUpdateError.trainingInterrupted(
+                    phase: checkpoint.currentPhase,
+                    progress: checkpoint.overallProgress
+                )
+            }
+            throw CancellationError()
         }
     }
 

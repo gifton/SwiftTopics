@@ -219,7 +219,7 @@ public actor UMAPOptimizer {
         // Compute gradient coefficient
         // grad_coef = -2ab × d^(2b-2) / (1 + a × d^(2b))
         let distPow2b = pow(distSq, b)
-        let gradCoef = -2.0 * a * b * pow(distSq, b - 1) / (1.0 + a * distPow2b)
+        let gradCoef = -2.0 * a * b * (distPow2b / max(distSq, epsilon)) / (1.0 + a * distPow2b)
 
         // Apply gradient to both points (Newton's third law)
         for d in 0..<nComponents {
@@ -401,7 +401,7 @@ extension UMAPOptimizer {
         }
 
         let distPow2b = pow(distSq, b)
-        let gradCoef = -2.0 * a * b * pow(distSq, b - 1) / (1.0 + a * distPow2b)
+        let gradCoef = -2.0 * a * b * (distPow2b / max(distSq, epsilon)) / (1.0 + a * distPow2b)
 
         for d in 0..<nComponents {
             let diff = embedding[source][d] - embedding[target][d]
@@ -520,7 +520,6 @@ extension UMAPOptimizer {
         startingEpoch: Int = 0,
         samplingScheduleState: [Float]? = nil,
         checkpointInterval: Int = 50,
-        shouldContinue: @escaping @Sendable () -> Bool = { true },
         onCheckpoint: (@Sendable (CheckpointInfo) async -> Void)? = nil
     ) async -> InterruptibleResult {
         let n = embedding.count
@@ -555,7 +554,7 @@ extension UMAPOptimizer {
         // Run epochs
         for epoch in startingEpoch..<nEpochs {
             // Check if we should continue before starting epoch
-            guard shouldContinue() else {
+            if Task.isCancelled {
                 break
             }
 
@@ -830,7 +829,6 @@ extension UMAPOptimizer {
         gpuContext: TopicsGPUContext,
         startingEpoch: Int = 0,
         checkpointInterval: Int = 50,
-        shouldContinue: @escaping @Sendable () -> Bool = { true },
         onCheckpoint: (@Sendable (CheckpointInfo) async -> Void)? = nil
     ) async throws -> InterruptibleResult {
         let edges = fuzzySet.toEdgeList()
@@ -861,7 +859,7 @@ extension UMAPOptimizer {
 
         for epoch in startingEpoch..<nEpochs {
             // Check if we should continue before starting epoch
-            guard shouldContinue() else {
+            if Task.isCancelled {
                 break
             }
 

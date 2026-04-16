@@ -55,6 +55,15 @@ public actor TopicModel {
 
     // MARK: - Properties
 
+    /// The dimensionality reducer used by this model.
+    public var reducer: any DimensionReducer
+
+    /// The clustering engine used by this model.
+    public let clusterer: any ClusteringEngine
+
+    /// The topic representer used by this model.
+    public let representer: any TopicRepresenter
+
     /// The configuration used by this model.
     public nonisolated let configuration: TopicModelConfiguration
 
@@ -79,10 +88,32 @@ public actor TopicModel {
 
     // MARK: - Initialization
 
+    /// Creates a topic model with explicit dependencies.
+    ///
+    /// - Parameters:
+    ///   - reducer: The component to reduce embedding dimensionality.
+    ///   - clusterer: The engine to cluster embeddings.
+    ///   - representer: The component to extract keywords.
+    ///   - configuration: Fallback configuration for metadata and coherence evaluation.
+    public init(
+        reducer: any DimensionReducer,
+        clusterer: any ClusteringEngine,
+        representer: any TopicRepresenter,
+        configuration: TopicModelConfiguration = .default
+    ) {
+        self.reducer = reducer
+        self.clusterer = clusterer
+        self.representer = representer
+        self.configuration = configuration
+    }
+
     /// Creates a topic model with the given configuration.
     ///
     /// - Parameter configuration: The configuration to use.
     public init(configuration: TopicModelConfiguration = .default) {
+        self.reducer = configuration.buildReducer()
+        self.clusterer = configuration.buildClusterer()
+        self.representer = configuration.buildRepresenter()
         self.configuration = configuration
     }
 
@@ -375,14 +406,15 @@ public actor TopicModel {
         distances.reserveCapacity(state.centroids.count)
 
         for (i, centroid) in state.centroids.enumerated() {
-            let dist = euclideanDistance(embedding, centroid)
+            let dist = embedding.euclideanDistance(centroid)
             distances.append((i, dist))
         }
 
-        // Convert distances to probabilities using softmax over negative distances
-        // This gives higher probability to closer topics
-        let negDistances = distances.map { -$0.distance }
-        let probabilities = softmax(negDistances)
+        // Convert distances to probabilities using a Student-t style transform:
+        // p_i ∝ 1 / (1 + d_i^2), then normalized. This is more stable in high-D.
+        let weights = distances.map { 1.0 / (1.0 + $0.distance * $0.distance) }
+        let weightSum = weights.reduce(0, +)
+        let probabilities = weightSum > 0 ? weights.map { $0 / weightSum } : Array(repeating: 0.0 as Float, count: weights.count)
 
         // Build topic assignments with alternatives
         var primaryAssignment: TopicAssignment?
@@ -474,7 +506,7 @@ public actor TopicModel {
         scores.reserveCapacity(state.embeddings.count)
 
         for (i, docEmbedding) in state.embeddings.enumerated() {
-            let similarity = cosineSimilarity(queryEmbedding, docEmbedding)
+            let similarity = queryEmbedding.cosineSimilarity(docEmbedding)
             scores.append((i, similarity))
         }
 
@@ -746,8 +778,8 @@ public actor TopicModel {
 
         // Sort by distance to centroid
         let sorted = docIndices.sorted { idxA, idxB in
-            let distA = euclideanDistance(embeddings[idxA], centroid)
-            let distB = euclideanDistance(embeddings[idxB], centroid)
+            let distA = embeddings[idxA].euclideanDistance(centroid)
+            let distB = embeddings[idxB].euclideanDistance(centroid)
             return distA < distB
         }
 
@@ -779,7 +811,7 @@ public actor TopicModel {
                     continue
                 }
 
-                let distance = euclideanDistance(centroids[idxA], centroids[idxB])
+                let distance = centroids[idxA].euclideanDistance(centroids[idxB])
                 if distance < minDistance {
                     minDistance = distance
                     bestPair = (topicA.id.value, topicB.id.value)
@@ -825,62 +857,24 @@ public actor TopicModel {
     private func reduceEmbeddings(
         _ embeddings: [Embedding]
     ) async throws -> (reduced: [Embedding], components: [Float]?) {
-        let config = configuration.reduction
-
-        // Skip reduction if method is none
-        guard config.method != .none else {
-            return (embeddings, nil)
-        }
-
-        // Don't reduce if already low-dimensional
+        // Don't reduce if already low-dimensional and we have a target dimension > 0
         let inputDim = embeddings.first?.dimension ?? 0
-        if inputDim <= config.outputDimension {
+        if self.reducer.outputDimension > 0 && inputDim <= self.reducer.outputDimension {
             return (embeddings, nil)
         }
 
-        switch config.method {
-        case .pca:
-            // Create PCA reducer
-            var pca = PCAReducer(
-                components: config.outputDimension,
-                whiten: config.pcaConfig?.whiten ?? false,
-                varianceRatio: config.pcaConfig?.varianceRatio,
-                seed: config.seed
-            )
+        try await self.reducer.fit(embeddings)
+        let reduced = try await self.reducer.transform(embeddings)
 
-            try await pca.fit(embeddings)
-            let reduced = try await pca.transform(embeddings)
-
-            return (reduced, pca.principalComponents)
-
-        case .umap:
-            // Create UMAP reducer
-            let umapConfig = config.umapConfig ?? .default
-            var umap = UMAPReducer(
-                nNeighbors: umapConfig.nNeighbors,
-                minDist: umapConfig.minDist,
-                nComponents: config.outputDimension,
-                metric: umapConfig.metric,
-                nEpochs: umapConfig.nEpochs,
-                seed: config.seed
-            )
-
-            try await umap.fit(embeddings)
-            let reduced = try await umap.transform(embeddings)
-
-            // UMAP doesn't have extractable components like PCA
-            return (reduced, nil)
-
-        case .none:
-            return (embeddings, nil)
-        }
+        // PCA has extractable components
+        let components = (self.reducer as? PCAReducer)?.principalComponents
+        return (reduced, components)
     }
 
     private func clusterEmbeddings(
         _ embeddings: [Embedding]
     ) async throws -> ClusterAssignment {
-        let engine = try await HDBSCANEngine(configuration: configuration.clustering)
-        return try await engine.fit(embeddings)
+        return try await self.clusterer.fit(embeddings)
     }
 
     private func extractTopics(
@@ -888,8 +882,7 @@ public actor TopicModel {
         embeddings: [Embedding],
         assignment: ClusterAssignment
     ) async throws -> [Topic] {
-        let representer = CTFIDFRepresenter(configuration: configuration.representation)
-        return try await representer.represent(
+        return try await self.representer.represent(
             documents: documents,
             embeddings: embeddings,
             assignment: assignment
@@ -951,7 +944,7 @@ public actor TopicModel {
             // Compute distance to centroid if available
             let distanceToCentroid: Float?
             if label >= 0, let centroid = centroids[label] {
-                distanceToCentroid = euclideanDistance(embeddings[i], centroid)
+                distanceToCentroid = embeddings[i].euclideanDistance(centroid)
             } else {
                 distanceToCentroid = nil
             }
@@ -1022,7 +1015,7 @@ public actor TopicModel {
         var nearestIndex = -1
 
         for (i, centroid) in centroids.enumerated() {
-            let dist = euclideanDistance(embedding, centroid)
+            let dist = embedding.euclideanDistance(centroid)
             if dist < minDist {
                 minDist = dist
                 nearestIndex = i
@@ -1033,9 +1026,9 @@ public actor TopicModel {
             return TopicAssignment.outlier
         }
 
-        // Simple probability based on inverse distance
-        // This is a heuristic - could be improved with actual probability models
-        let probability: Float = 1.0 / (1.0 + minDist)
+        // Simple probability based on UMAP's Student-t distribution
+        // This provides more stable gradients in high-dimensional space
+        let probability: Float = 1.0 / (1.0 + minDist * minDist)
 
         return TopicAssignment(
             topicID: topics[nearestIndex].id,
@@ -1043,67 +1036,6 @@ public actor TopicModel {
             distanceToCentroid: minDist,
             alternatives: nil
         )
-    }
-
-    private func euclideanDistance(_ a: Embedding, _ b: Embedding) -> Float {
-        var sum: Float = 0
-        let dim = min(a.dimension, b.dimension)
-        for d in 0..<dim {
-            let diff = a.vector[d] - b.vector[d]
-            sum += diff * diff
-        }
-        return sum.squareRoot()
-    }
-
-    /// Computes cosine similarity between two embeddings.
-    ///
-    /// Cosine similarity = (a · b) / (||a|| × ||b||)
-    /// Returns value in [-1, 1] where 1 means identical direction.
-    private func cosineSimilarity(_ a: Embedding, _ b: Embedding) -> Float {
-        let dim = min(a.dimension, b.dimension)
-        var dotProduct: Float = 0
-        var normA: Float = 0
-        var normB: Float = 0
-
-        for d in 0..<dim {
-            dotProduct += a.vector[d] * b.vector[d]
-            normA += a.vector[d] * a.vector[d]
-            normB += b.vector[d] * b.vector[d]
-        }
-
-        let denominator = (normA * normB).squareRoot()
-        guard denominator > 1e-10 else { return 0 }
-
-        return dotProduct / denominator
-    }
-
-    /// Applies softmax to convert log-probabilities to probabilities.
-    ///
-    /// Uses the numerically stable version: softmax(x)_i = exp(x_i - max(x)) / Σ exp(x_j - max(x))
-    private func softmax(_ values: [Float]) -> [Float] {
-        guard !values.isEmpty else { return [] }
-
-        // Find max for numerical stability
-        let maxVal = values.max() ?? 0
-
-        // Compute exp(x - max)
-        var expValues = values.map { exp($0 - maxVal) }
-
-        // Compute sum
-        let sum = expValues.reduce(0, +)
-
-        // Normalize
-        guard sum > 0 else {
-            // Uniform distribution if all values are equal
-            let uniform = 1.0 / Float(values.count)
-            return [Float](repeating: uniform, count: values.count)
-        }
-
-        for i in 0..<expValues.count {
-            expValues[i] /= sum
-        }
-
-        return expValues
     }
 }
 

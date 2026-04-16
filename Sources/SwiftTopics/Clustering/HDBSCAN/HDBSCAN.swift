@@ -61,7 +61,7 @@ public actor HDBSCANEngine: ClusteringEngine {
     public nonisolated let configuration: HDBSCANConfiguration
 
     /// GPU context for accelerated computation.
-    private let gpuContext: TopicsGPUContext?
+    private var gpuContext: TopicsGPUContext?
 
     /// Cached fitted model for prediction.
     private var fittedModel: FittedHDBSCANModel?
@@ -72,25 +72,18 @@ public actor HDBSCANEngine: ClusteringEngine {
     ///
     /// - Parameters:
     ///   - configuration: HDBSCAN configuration.
-    ///   - gpuContext: Optional GPU context (will attempt to create one if nil).
+    ///   - gpuContext: Optional GPU context (will attempt to create one lazily if nil).
     public init(
         configuration: HDBSCANConfiguration = .default,
         gpuContext: TopicsGPUContext? = nil
-    ) async throws {
+    ) {
         self.configuration = configuration
-
-        // Try to create GPU context if not provided
-        if let context = gpuContext {
-            self.gpuContext = context
-        } else {
-            // Attempt to create GPU context, but don't fail if unavailable
-            self.gpuContext = await TopicsGPUContext.create(allowCPUFallback: true)
-        }
+        self.gpuContext = gpuContext
     }
 
     /// Creates an HDBSCAN engine with default configuration.
-    public init() async throws {
-        try await self.init(configuration: .default)
+    public init() {
+        self.init(configuration: .default)
     }
 
     // MARK: - Fit
@@ -113,6 +106,10 @@ public actor HDBSCANEngine: ClusteringEngine {
     /// - Parameter embeddings: The embeddings to cluster.
     /// - Returns: Clustering result with hierarchy and metadata.
     public func fitWithDetails(_ embeddings: [Embedding]) async throws -> ClusteringResult {
+        if self.gpuContext == nil {
+            self.gpuContext = await TopicsGPUContext.create(allowCPUFallback: true)
+        }
+
         let startTime = Date()
 
         // Validate input
@@ -466,7 +463,7 @@ public func hdbscan(
     _ embeddings: [Embedding],
     configuration: HDBSCANConfiguration = .default
 ) async throws -> ClusterAssignment {
-    let engine = try await HDBSCANEngine(configuration: configuration)
+    let engine = HDBSCANEngine(configuration: configuration)
     return try await engine.fit(embeddings)
 }
 
@@ -480,7 +477,7 @@ public func hdbscanWithDetails(
     _ embeddings: [Embedding],
     configuration: HDBSCANConfiguration = .default
 ) async throws -> ClusteringResult {
-    let engine = try await HDBSCANEngine(configuration: configuration)
+    let engine = HDBSCANEngine(configuration: configuration)
     return try await engine.fitWithDetails(embeddings)
 }
 
@@ -573,8 +570,8 @@ public struct HDBSCANBuilder: Sendable {
     }
 
     /// Builds the HDBSCAN engine.
-    public func build() async throws -> HDBSCANEngine {
-        try await HDBSCANEngine(configuration: buildConfiguration())
+    public func build() -> HDBSCANEngine {
+        HDBSCANEngine(configuration: buildConfiguration())
     }
 }
 

@@ -80,35 +80,39 @@ public enum CheckpointSerializer {
     public static func deserializeEmbedding(_ data: Data) -> [[Float]]? {
         guard data.count >= 8 else { return nil }
 
-        return data.withUnsafeBytes { buffer in
-            let ptr = buffer.bindMemory(to: UInt8.self).baseAddress!
-
-            // Read header
-            let nPoints = Int(ptr.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-            let nDimensions = Int((ptr + 4).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-
-            guard nPoints > 0, nDimensions > 0 else { return nil }
-
-            let expectedSize = 8 + nPoints * nDimensions * 4
-            guard data.count >= expectedSize else { return nil }
-
-            // Read data
-            let floatPtr = (ptr + 8).withMemoryRebound(to: Float.self, capacity: nPoints * nDimensions) { $0 }
-
-            var embedding = [[Float]]()
-            embedding.reserveCapacity(nPoints)
-
-            for i in 0..<nPoints {
-                var row = [Float]()
-                row.reserveCapacity(nDimensions)
-                for j in 0..<nDimensions {
-                    row.append(floatPtr[i * nDimensions + j])
-                }
-                embedding.append(row)
-            }
-
-            return embedding
+        // Read header with unaligned-safe copies
+        var nPoints: Int32 = 0
+        withUnsafeMutableBytes(of: &nPoints) { dest in
+            _ = data.copyBytes(to: dest, from: 0..<4)
         }
+
+        var nDimensions: Int32 = 0
+        withUnsafeMutableBytes(of: &nDimensions) { dest in
+            _ = data.copyBytes(to: dest, from: 4..<(4 + 4))
+        }
+
+        guard nPoints > 0, nDimensions > 0 else { return nil }
+
+        let n = Int(nPoints)
+        let d = Int(nDimensions)
+        let expectedSize = 8 + n * d * MemoryLayout<Float>.size
+        guard data.count >= expectedSize else { return nil }
+
+        // Copy floats into a properly aligned buffer
+        var flat = [Float](repeating: 0, count: n * d)
+        flat.withUnsafeMutableBytes { dest in
+            let range = 8..<(8 + n * d * MemoryLayout<Float>.size)
+            _ = data.copyBytes(to: dest, from: range)
+        }
+
+        // Rebuild rows without additional copies
+        var embedding = Array(repeating: [Float](), count: n)
+        for i in 0..<n {
+            let start = i * d
+            let end = start + d
+            embedding[i] = Array(flat[start..<end])
+        }
+        return embedding
     }
 
     // MARK: - MST Edge Serialization
@@ -149,32 +153,42 @@ public enum CheckpointSerializer {
     public static func deserializeMSTEdges(_ data: Data) -> [MSTEdge]? {
         guard data.count >= 4 else { return nil }
 
-        return data.withUnsafeBytes { buffer in
-            let ptr = buffer.bindMemory(to: UInt8.self).baseAddress!
+        var edgeCount: Int32 = 0
+        withUnsafeMutableBytes(of: &edgeCount) { dest in
+            _ = data.copyBytes(to: dest, from: 0..<4)
+        }
+        guard edgeCount >= 0 else { return nil }
+        let count = Int(edgeCount)
+        let expectedSize = 4 + count * (2 * MemoryLayout<Int32>.size + MemoryLayout<Float>.size)
+        guard data.count >= expectedSize else { return nil }
 
-            // Read header
-            let edgeCount = Int(ptr.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
+        var edges: [MSTEdge] = []
+        edges.reserveCapacity(count)
 
-            guard edgeCount >= 0 else { return nil }
+        var offset = 4
+        for _ in 0..<count {
+            let sRange = offset..<(offset + 4)
+            let tRange = (offset + 4)..<(offset + 8)
+            let wRange = (offset + 8)..<(offset + 12)
 
-            let expectedSize = 4 + edgeCount * 12
-            guard data.count >= expectedSize else { return nil }
-
-            var edges = [MSTEdge]()
-            edges.reserveCapacity(edgeCount)
-
-            var offset = 4
-            for _ in 0..<edgeCount {
-                let source = Int((ptr + offset).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-                let target = Int((ptr + offset + 4).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-                let weight = (ptr + offset + 8).withMemoryRebound(to: Float.self, capacity: 1) { $0.pointee }
-
-                edges.append(MSTEdge(source: source, target: target, weight: weight))
-                offset += 12
+            var s: Int32 = 0
+            withUnsafeMutableBytes(of: &s) { dest in
+                _ = data.copyBytes(to: dest, from: sRange)
+            }
+            var t: Int32 = 0
+            withUnsafeMutableBytes(of: &t) { dest in
+                _ = data.copyBytes(to: dest, from: tRange)
+            }
+            var w: Float = 0
+            withUnsafeMutableBytes(of: &w) { dest in
+                _ = data.copyBytes(to: dest, from: wRange)
             }
 
-            return edges
+            edges.append(MSTEdge(source: Int(s), target: Int(t), weight: w))
+            offset += 12
         }
+
+        return edges
     }
 
     // MARK: - Boolean Array Serialization
@@ -216,31 +230,26 @@ public enum CheckpointSerializer {
     public static func deserializeBoolArray(_ data: Data) -> [Bool]? {
         guard data.count >= 4 else { return nil }
 
-        return data.withUnsafeBytes { buffer in
-            let ptr = buffer.bindMemory(to: UInt8.self).baseAddress!
-
-            // Read header
-            let count = Int(ptr.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-
-            guard count >= 0 else { return nil }
-
-            let byteCount = (count + 7) / 8
-            guard data.count >= 4 + byteCount else { return nil }
-
-            var booleans = [Bool]()
-            booleans.reserveCapacity(count)
-
-            for byteIdx in 0..<byteCount {
-                let byte = ptr[4 + byteIdx]
-                for bitIdx in 0..<8 {
-                    let boolIdx = byteIdx * 8 + bitIdx
-                    if boolIdx >= count { break }
-                    booleans.append((byte & (1 << bitIdx)) != 0)
-                }
-            }
-
-            return booleans
+        var count: Int32 = 0
+        withUnsafeMutableBytes(of: &count) { dest in
+            _ = data.copyBytes(to: dest, from: 0..<4)
         }
+        guard count >= 0 else { return nil }
+        let c = Int(count)
+        let byteCount = (c + 7) / 8
+        guard data.count >= 4 + byteCount else { return nil }
+
+        var booleans = [Bool]()
+        booleans.reserveCapacity(c)
+        for byteIdx in 0..<byteCount {
+            let byte = data[4 + byteIdx]
+            for bitIdx in 0..<8 {
+                let idx = byteIdx * 8 + bitIdx
+                if idx >= c { break }
+                booleans.append((byte & (1 << bitIdx)) != 0)
+            }
+        }
+        return booleans
     }
 
     // MARK: - Float Array Serialization
@@ -274,28 +283,21 @@ public enum CheckpointSerializer {
     public static func deserializeFloatArray(_ data: Data) -> [Float]? {
         guard data.count >= 4 else { return nil }
 
-        return data.withUnsafeBytes { buffer in
-            let ptr = buffer.bindMemory(to: UInt8.self).baseAddress!
-
-            // Read header
-            let count = Int(ptr.withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-
-            guard count >= 0 else { return nil }
-
-            let expectedSize = 4 + count * 4
-            guard data.count >= expectedSize else { return nil }
-
-            let floatPtr = (ptr + 4).withMemoryRebound(to: Float.self, capacity: count) { $0 }
-
-            var floats = [Float]()
-            floats.reserveCapacity(count)
-
-            for i in 0..<count {
-                floats.append(floatPtr[i])
-            }
-
-            return floats
+        var count: Int32 = 0
+        withUnsafeMutableBytes(of: &count) { dest in
+            _ = data.copyBytes(to: dest, from: 0..<4)
         }
+        guard count >= 0 else { return nil }
+        let c = Int(count)
+        let expectedSize = 4 + c * MemoryLayout<Float>.size
+        guard data.count >= expectedSize else { return nil }
+
+        var floats = [Float](repeating: 0, count: c)
+        floats.withUnsafeMutableBytes { dest in
+            let range = 4..<(4 + c * MemoryLayout<Float>.size)
+            _ = data.copyBytes(to: dest, from: range)
+        }
+        return floats
     }
 
     // MARK: - Core Distance Serialization

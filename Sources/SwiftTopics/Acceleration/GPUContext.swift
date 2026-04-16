@@ -665,27 +665,44 @@ public actor TopicsGPUContext {
         var similarities = [[Float]](repeating: [Float](repeating: 0, count: n), count: n)
         let d = embeddings[0].dimension
 
-        // Precompute norms
-        var norms = [Float](repeating: 0, count: n)
-        for i in 0..<n {
-            var normSq: Float = 0
-            for k in 0..<d {
-                normSq += embeddings[i].vector[k] * embeddings[i].vector[k]
-            }
-            norms[i] = sqrt(normSq)
-        }
+        let allNormalized = embeddings.allSatisfy { $0.isNormalized }
 
-        // Compute similarities
-        for i in 0..<n {
-            similarities[i][i] = 1.0  // Self-similarity
-            for j in (i + 1)..<n {
-                var dot: Float = 0
-                for k in 0..<d {
-                    dot += embeddings[i].vector[k] * embeddings[j].vector[k]
+        if allNormalized {
+            // Fast path: cosine similarity reduces to dot product
+            for i in 0..<n {
+                similarities[i][i] = 1.0
+                for j in (i + 1)..<n {
+                    var dot: Float = 0
+                    for k in 0..<d {
+                        dot += embeddings[i].vector[k] * embeddings[j].vector[k]
+                    }
+                    similarities[i][j] = dot
+                    similarities[j][i] = dot
                 }
-                let sim = (norms[i] > 0 && norms[j] > 0) ? dot / (norms[i] * norms[j]) : 0
-                similarities[i][j] = sim
-                similarities[j][i] = sim
+            }
+        } else {
+            // Precompute norms
+            var norms = [Float](repeating: 0, count: n)
+            for i in 0..<n {
+                var normSq: Float = 0
+                for k in 0..<d {
+                    normSq += embeddings[i].vector[k] * embeddings[i].vector[k]
+                }
+                norms[i] = sqrt(normSq)
+            }
+
+            // Compute similarities
+            for i in 0..<n {
+                similarities[i][i] = 1.0  // Self-similarity
+                for j in (i + 1)..<n {
+                    var dot: Float = 0
+                    for k in 0..<d {
+                        dot += embeddings[i].vector[k] * embeddings[j].vector[k]
+                    }
+                    let sim = (norms[i] > 0 && norms[j] > 0) ? dot / (norms[i] * norms[j]) : 0
+                    similarities[i][j] = sim
+                    similarities[j][i] = sim
+                }
             }
         }
 
@@ -734,7 +751,7 @@ public actor TopicsGPUContext {
             guard norm > 0 else { return embedding }
 
             let normalized = embedding.vector.map { $0 / norm }
-            return Embedding(vector: normalized)
+            return Embedding(vector: normalized, isNormalized: true)
         }
     }
 

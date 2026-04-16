@@ -109,11 +109,11 @@ public struct MinimumSpanningTree: Sendable {
 ///
 /// ## Complexity
 ///
-/// - Time: O(n² log n) with binary heap (dominated by edge exploration)
-/// - Space: O(n) for visited set + O(n log n) for heap
+/// - Time: O(n²) using a dense graph approach with `minEdgeWeight` array
+/// - Space: O(n) for tracking minimum edge weights and sources
 ///
 /// For dense graphs (like mutual reachability), Prim's with adjacency matrix
-/// would be O(n²), but we use lazy evaluation of edges via the heap.
+/// is O(n²) and avoids the O(n² log n) cost of a binary heap.
 public struct PrimMSTBuilder: Sendable {
 
     /// Creates an MST builder.
@@ -140,138 +140,55 @@ public struct PrimMSTBuilder: Sendable {
         // Track which points are in the MST
         var inMST = [Bool](repeating: false, count: n)
 
-        // Priority queue of candidate edges (min-heap by weight)
-        var heap = MinHeap<PrimHeapEntry>()
+        // Track the minimum distance to each point from the MST
+        var minEdgeWeight = [Float](repeating: Float.infinity, count: n)
+        var minEdgeSource = [Int](repeating: -1, count: n)
 
         // Start from point 0
         inMST[0] = true
         var mstSize = 1
-
-        // Add all edges from point 0 to the heap
-        addEdgesToHeap(from: 0, graph: graph, inMST: inMST, heap: &heap)
+        var currentPoint = 0
 
         // Grow MST until all points included
-        while mstSize < n, let entry = heap.removeMin() {
-            let targetPoint = entry.target
+        while mstSize < n {
+            // Update minEdgeWeight for all points not in MST
+            for j in 0..<n {
+                if !inMST[j] {
+                    let weight = graph.distance(from: currentPoint, to: j)
+                    if weight < minEdgeWeight[j] {
+                        minEdgeWeight[j] = weight
+                        minEdgeSource[j] = currentPoint
+                    }
+                }
+            }
 
-            // Skip if target already in MST (stale entry)
-            guard !inMST[targetPoint] else { continue }
+            // Find the next point to add (min weight)
+            var minWeight: Float = .infinity
+            var nextPoint = -1
+
+            for j in 0..<n {
+                if !inMST[j] && minEdgeWeight[j] < minWeight {
+                    minWeight = minEdgeWeight[j]
+                    nextPoint = j
+                }
+            }
+
+            guard nextPoint != -1 else { break }
 
             // Add edge to MST
             mstEdges.append(MSTEdge(
-                source: entry.source,
-                target: targetPoint,
-                weight: entry.weight
+                source: minEdgeSource[nextPoint],
+                target: nextPoint,
+                weight: minWeight
             ))
 
             // Mark target as in MST
-            inMST[targetPoint] = true
+            inMST[nextPoint] = true
             mstSize += 1
-
-            // Add edges from new point to heap
-            addEdgesToHeap(from: targetPoint, graph: graph, inMST: inMST, heap: &heap)
+            currentPoint = nextPoint
         }
 
         return MinimumSpanningTree(edges: mstEdges, pointCount: n)
-    }
-
-    /// Adds candidate edges from a point to the heap.
-    private func addEdgesToHeap(
-        from pointIndex: Int,
-        graph: MutualReachabilityGraph,
-        inMST: [Bool],
-        heap: inout MinHeap<PrimHeapEntry>
-    ) {
-        for j in 0..<graph.count {
-            guard !inMST[j] else { continue }
-
-            let weight = graph.distance(from: pointIndex, to: j)
-            heap.insert(PrimHeapEntry(source: pointIndex, target: j, weight: weight))
-        }
-    }
-}
-
-// MARK: - Prim Heap Entry
-
-/// A candidate edge for Prim's algorithm.
-private struct PrimHeapEntry: Comparable, Sendable {
-    let source: Int
-    let target: Int
-    let weight: Float
-
-    static func < (lhs: PrimHeapEntry, rhs: PrimHeapEntry) -> Bool {
-        lhs.weight < rhs.weight
-    }
-}
-
-// MARK: - Min Heap
-
-/// A simple binary min-heap for Prim's algorithm.
-///
-/// This is a basic implementation optimized for the MST use case.
-private struct MinHeap<Element: Comparable>: Sendable where Element: Sendable {
-
-    private var elements: [Element] = []
-
-    var isEmpty: Bool { elements.isEmpty }
-    var count: Int { elements.count }
-
-    /// Inserts an element into the heap.
-    mutating func insert(_ element: Element) {
-        elements.append(element)
-        siftUp(elements.count - 1)
-    }
-
-    /// Removes and returns the minimum element.
-    mutating func removeMin() -> Element? {
-        guard !elements.isEmpty else { return nil }
-
-        if elements.count == 1 {
-            return elements.removeLast()
-        }
-
-        let min = elements[0]
-        elements[0] = elements.removeLast()
-        siftDown(0)
-        return min
-    }
-
-    private mutating func siftUp(_ index: Int) {
-        var child = index
-        while child > 0 {
-            let parent = (child - 1) / 2
-            if elements[child] < elements[parent] {
-                elements.swapAt(child, parent)
-                child = parent
-            } else {
-                break
-            }
-        }
-    }
-
-    private mutating func siftDown(_ index: Int) {
-        var parent = index
-        let count = elements.count
-
-        while true {
-            let left = 2 * parent + 1
-            let right = 2 * parent + 2
-            var smallest = parent
-
-            if left < count && elements[left] < elements[smallest] {
-                smallest = left
-            }
-            if right < count && elements[right] < elements[smallest] {
-                smallest = right
-            }
-
-            if smallest == parent {
-                break
-            }
-
-            elements.swapAt(parent, smallest)
-            parent = smallest
-        }
     }
 }
 
@@ -290,7 +207,6 @@ private struct MinHeap<Element: Comparable>: Sendable where Element: Sendable {
 /// it grows the MST one edge at a time. The state consists of:
 /// - `mstEdges`: Edges added to MST so far
 /// - `inMST`: Boolean array marking which points are in the MST
-/// - `heap`: Priority queue of candidate edges (reconstructed on resume)
 ///
 /// ## Checkpoint Strategy
 ///
@@ -369,7 +285,6 @@ public struct InterruptibleMSTBuilder: Sendable {
         from graph: MutualReachabilityGraph,
         startingEdges: [MSTEdge]? = nil,
         startingInMST: [Bool]? = nil,
-        shouldContinue: @escaping @Sendable () -> Bool = { true },
         onCheckpoint: (@Sendable (CheckpointInfo) async -> Void)? = nil
     ) async -> InterruptibleResult {
         let n = graph.count
@@ -387,6 +302,9 @@ public struct InterruptibleMSTBuilder: Sendable {
         var inMST: [Bool]
         var mstSize: Int
 
+        var minEdgeWeight = [Float](repeating: Float.infinity, count: n)
+        var minEdgeSource = [Int](repeating: -1, count: n)
+
         if let savedEdges = startingEdges,
            let savedInMST = startingInMST,
            savedInMST.count == n {
@@ -394,6 +312,18 @@ public struct InterruptibleMSTBuilder: Sendable {
             mstEdges = savedEdges
             inMST = savedInMST
             mstSize = savedInMST.filter { $0 }.count
+
+            // Recompute minEdgeWeight array for points not in MST
+            // O(n * k) which is perfectly fine on resume
+            for i in 0..<n where inMST[i] {
+                for j in 0..<n where !inMST[j] {
+                    let weight = graph.distance(from: i, to: j)
+                    if weight < minEdgeWeight[j] {
+                        minEdgeWeight[j] = weight
+                        minEdgeSource[j] = i
+                    }
+                }
+            }
         } else {
             // Start fresh
             mstEdges = []
@@ -403,14 +333,12 @@ public struct InterruptibleMSTBuilder: Sendable {
             // Start from point 0
             inMST[0] = true
             mstSize = 1
-        }
 
-        // Rebuild heap from current state
-        var heap = MinHeap<PrimHeapEntry>()
-
-        // Add edges from all points currently in MST
-        for i in 0..<n where inMST[i] {
-            addEdgesToHeap(from: i, graph: graph, inMST: inMST, heap: &heap)
+            // Initialize minEdgeWeights from point 0
+            for j in 0..<n where !inMST[j] {
+                minEdgeWeight[j] = graph.distance(from: 0, to: j)
+                minEdgeSource[j] = 0
+            }
         }
 
         var edgesSinceCheckpoint = 0
@@ -418,32 +346,44 @@ public struct InterruptibleMSTBuilder: Sendable {
         // Grow MST until all points included or interrupted
         while mstSize < n {
             // Check if we should continue
-            guard shouldContinue() else {
+            if Task.isCancelled {
                 break
             }
 
-            guard let entry = heap.removeMin() else {
-                break
+            // Find the next point to add (min weight)
+            var minWeight: Float = .infinity
+            var nextPoint = -1
+
+            for j in 0..<n {
+                if !inMST[j] && minEdgeWeight[j] < minWeight {
+                    minWeight = minEdgeWeight[j]
+                    nextPoint = j
+                }
             }
 
-            let targetPoint = entry.target
-
-            // Skip if target already in MST (stale entry)
-            guard !inMST[targetPoint] else { continue }
+            guard nextPoint != -1 else { break }
 
             // Add edge to MST
             mstEdges.append(MSTEdge(
-                source: entry.source,
-                target: targetPoint,
-                weight: entry.weight
+                source: minEdgeSource[nextPoint],
+                target: nextPoint,
+                weight: minWeight
             ))
 
             // Mark target as in MST
-            inMST[targetPoint] = true
+            inMST[nextPoint] = true
             mstSize += 1
 
-            // Add edges from new point to heap
-            addEdgesToHeap(from: targetPoint, graph: graph, inMST: inMST, heap: &heap)
+            // Update minEdgeWeight for all remaining points
+            for j in 0..<n {
+                if !inMST[j] {
+                    let weight = graph.distance(from: nextPoint, to: j)
+                    if weight < minEdgeWeight[j] {
+                        minEdgeWeight[j] = weight
+                        minEdgeSource[j] = nextPoint
+                    }
+                }
+            }
 
             edgesSinceCheckpoint += 1
 
@@ -475,21 +415,6 @@ public struct InterruptibleMSTBuilder: Sendable {
             pointCount: n,
             inMST: inMST
         )
-    }
-
-    /// Adds candidate edges from a point to the heap.
-    private func addEdgesToHeap(
-        from pointIndex: Int,
-        graph: MutualReachabilityGraph,
-        inMST: [Bool],
-        heap: inout MinHeap<PrimHeapEntry>
-    ) {
-        for j in 0..<graph.count {
-            guard !inMST[j] else { continue }
-
-            let weight = graph.distance(from: pointIndex, to: j)
-            heap.insert(PrimHeapEntry(source: pointIndex, target: j, weight: weight))
-        }
     }
 }
 

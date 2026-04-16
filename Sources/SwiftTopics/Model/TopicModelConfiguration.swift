@@ -229,6 +229,43 @@ public struct TopicModelConfiguration: Sendable, Codable {
             keywordsPerTopic: representation.keywordsPerTopic
         )
     }
+
+    // MARK: - Component Factories
+
+    /// Builds a dimension reducer based on this configuration.
+    public func buildReducer() -> any DimensionReducer {
+        switch reduction.method {
+        case .pca:
+            return PCAReducer(
+                components: reduction.outputDimension,
+                whiten: reduction.pcaConfig?.whiten ?? false,
+                varianceRatio: reduction.pcaConfig?.varianceRatio,
+                seed: reduction.seed
+            )
+        case .umap:
+            let umapConfig = reduction.umapConfig ?? .default
+            return UMAPReducer(
+                nNeighbors: umapConfig.nNeighbors,
+                minDist: umapConfig.minDist,
+                nComponents: reduction.outputDimension,
+                metric: umapConfig.metric,
+                nEpochs: umapConfig.nEpochs,
+                seed: reduction.seed
+            )
+        case .none:
+            return IdentityReducer()
+        }
+    }
+
+    /// Builds a clustering engine based on this configuration.
+    public func buildClusterer() -> any ClusteringEngine {
+        return HDBSCANEngine(configuration: clustering)
+    }
+
+    /// Builds a topic representer based on this configuration.
+    public func buildRepresenter() -> any TopicRepresenter {
+        return CTFIDFRepresenter(configuration: representation)
+    }
 }
 
 // MARK: - Builder

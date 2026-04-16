@@ -4,6 +4,7 @@
 // Vector wrapper with dimension validation for embeddings
 
 import Foundation
+import Accelerate
 import VectorCore
 
 // MARK: - Embedding
@@ -33,6 +34,13 @@ public struct Embedding: Sendable, Codable, Hashable {
     /// The vector components.
     public let vector: [Float]
 
+    /// Whether this vector is already L2-normalized (unit length).
+    ///
+    /// Propagated from upstream embedding providers when they are configured
+    /// to normalize output. Enables downstream optimizations (e.g., cosine
+    /// similarity reduces to dot product on normalized vectors).
+    public let isNormalized: Bool
+
     /// The dimensionality of this embedding.
     @inlinable
     public var dimension: Int {
@@ -43,16 +51,18 @@ public struct Embedding: Sendable, Codable, Hashable {
     ///
     /// - Parameter vector: The embedding components.
     /// - Precondition: Vector must not be empty.
-    public init(vector: [Float]) {
+    public init(vector: [Float], isNormalized: Bool = false) {
         precondition(!vector.isEmpty, "Embedding vector cannot be empty")
         self.vector = vector
+        self.isNormalized = isNormalized
     }
 
     /// Creates an embedding from a `DynamicVector`.
     ///
     /// - Parameter dynamicVector: A VectorCore DynamicVector.
-    public init(dynamicVector: DynamicVector) {
+    public init(dynamicVector: DynamicVector, isNormalized: Bool = false) {
         self.vector = dynamicVector.toArray()
+        self.isNormalized = isNormalized
     }
 
     /// Creates a zero embedding of the specified dimension.
@@ -93,6 +103,28 @@ public struct Embedding: Sendable, Codable, Hashable {
     }
 }
 
+// MARK: - Codable Backward Compatibility
+
+extension Embedding {
+    private enum CodingKeys: String, CodingKey {
+        case vector
+        case isNormalized
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let vector = try container.decode([Float].self, forKey: .vector)
+        let isNormalized = try container.decodeIfPresent(Bool.self, forKey: .isNormalized) ?? false
+        self.init(vector: vector, isNormalized: isNormalized)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(vector, forKey: .vector)
+        try container.encode(isNormalized, forKey: .isNormalized)
+    }
+}
+
 // MARK: - Embedding Collection Operations
 
 extension Embedding {
@@ -120,7 +152,7 @@ extension Embedding {
         let norm = l2Norm
         guard norm > Float.ulpOfOne else { return self }
         let normalizedVector = vector.map { $0 / norm }
-        return Embedding(vector: normalizedVector)
+        return Embedding(vector: normalizedVector, isNormalized: true)
     }
 
     /// Computes the dot product with another embedding.
@@ -133,11 +165,13 @@ extension Embedding {
     @inlinable
     public func dot(_ other: Embedding) -> Float {
         precondition(dimension == other.dimension, "Embeddings must have same dimension")
-        var result: Float = 0
-        for i in 0..<dimension {
-            result += vector[i] * other.vector[i]
+        var res: Float = 0
+        vector.withUnsafeBufferPointer { aBuf in
+            other.vector.withUnsafeBufferPointer { bBuf in
+                vDSP_dotpr(aBuf.baseAddress!, 1, bBuf.baseAddress!, 1, &res, vDSP_Length(dimension))
+            }
         }
-        return result
+        return res
     }
 
     /// Computes the cosine similarity with another embedding.
@@ -163,12 +197,13 @@ extension Embedding {
     /// - Precondition: Both embeddings must have the same dimension.
     public func euclideanDistance(_ other: Embedding) -> Float {
         precondition(dimension == other.dimension, "Embeddings must have same dimension")
-        var sumSquares: Float = 0
-        for i in 0..<dimension {
-            let diff = vector[i] - other.vector[i]
-            sumSquares += diff * diff
+        var distSq: Float = 0
+        vector.withUnsafeBufferPointer { aBuf in
+            other.vector.withUnsafeBufferPointer { bBuf in
+                vDSP_distancesq(aBuf.baseAddress!, 1, bBuf.baseAddress!, 1, &distSq, vDSP_Length(dimension))
+            }
         }
-        return sumSquares.squareRoot()
+        return distSq.squareRoot()
     }
 }
 

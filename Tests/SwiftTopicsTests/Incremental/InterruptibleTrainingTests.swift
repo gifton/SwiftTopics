@@ -65,7 +65,6 @@ struct InterruptibleUMAPTests {
             learningRate: 1.0,
             negativeSampleRate: 5,
             checkpointInterval: 10,
-            shouldContinue: { true },
             onCheckpoint: { info in
                 await checkpointState.update { $0.append(info.epoch) }
             }
@@ -107,8 +106,7 @@ struct InterruptibleUMAPTests {
             nEpochs: 30,
             learningRate: 1.0,
             negativeSampleRate: 5,
-            checkpointInterval: 15,
-            shouldContinue: { true }
+            checkpointInterval: 15
         )
 
         #expect(result.embedding.count == 20)
@@ -146,7 +144,6 @@ struct InterruptibleUMAPTests {
             learningRate: 1.0,
             negativeSampleRate: 5,
             checkpointInterval: 5,
-            shouldContinue: { true },
             onCheckpoint: { info in
                 await progressState.update { $0.append(info.progress) }
             }
@@ -177,8 +174,7 @@ struct InterruptibleMSTTests {
 
         let builder = InterruptibleMSTBuilder(checkpointEdgeInterval: 10)
         let result = await builder.build(
-            from: mrGraph,
-            shouldContinue: { true }
+            from: mrGraph
         )
 
         #expect(result.isComplete)
@@ -198,8 +194,7 @@ struct InterruptibleMSTTests {
         // Build using interruptible builder
         let interruptibleBuilder = InterruptibleMSTBuilder(checkpointEdgeInterval: 10)
         let interruptibleResult = await interruptibleBuilder.build(
-            from: mrGraph,
-            shouldContinue: { true }
+            from: mrGraph
         )
 
         // Build using standard Prim
@@ -229,7 +224,6 @@ struct InterruptibleMSTTests {
         let builder = InterruptibleMSTBuilder(checkpointEdgeInterval: 5)
         let result = await builder.build(
             from: mrGraph,
-            shouldContinue: { true },
             onCheckpoint: { info in
                 await progressState.update { $0.append(info.progress) }
             }
@@ -256,7 +250,6 @@ struct InterruptibleMSTTests {
         let builder1 = InterruptibleMSTBuilder(checkpointEdgeInterval: 100)
         let result1 = await builder1.build(
             from: mrGraph,
-            shouldContinue: { true }
         )
 
         // Test resumption with known partial state
@@ -277,7 +270,6 @@ struct InterruptibleMSTTests {
             from: mrGraph,
             startingEdges: startingEdges,
             startingInMST: startingInMST,
-            shouldContinue: { true }
         )
 
         #expect(result2.isComplete)

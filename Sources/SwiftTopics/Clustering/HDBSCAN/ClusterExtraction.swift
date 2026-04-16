@@ -490,19 +490,19 @@ public struct MembershipProbabilityCalculator: Sendable {
                 minDist = min(minDist, distances[c])
             }
 
-            // Convert distances to probabilities using softmax-like transform
-            var expSum: Float = 0
+            // Convert distances to probabilities using Student-t distribution
+            var weightSum: Float = 0
             for c in 0..<k {
-                let adjusted = max(0, distances[c] - minDist) + smoothing
-                let exp = Darwin.exp(-adjusted)
-                probabilities[i][c] = exp
-                expSum += exp
+                let distSq = distances[c] * distances[c]
+                let weight = 1.0 / (1.0 + distSq)
+                probabilities[i][c] = weight
+                weightSum += weight
             }
 
             // Normalize
-            if expSum > 0 {
+            if weightSum > 0 {
                 for c in 0..<k {
-                    probabilities[i][c] /= expSum
+                    probabilities[i][c] /= weightSum
                 }
             }
         }

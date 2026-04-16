@@ -144,7 +144,6 @@ public actor InterruptibleTrainingRunner {
     ///   - embeddings: Pre-computed embeddings.
     ///   - configuration: Training configuration.
     ///   - type: Training type (microRetrain or fullRefresh).
-    ///   - shouldContinue: Closure checked between operations. Return false to interrupt.
     ///   - onProgress: Progress callback.
     /// - Returns: Training result with state or checkpoint.
     public func runTraining(
@@ -152,7 +151,6 @@ public actor InterruptibleTrainingRunner {
         embeddings: [Embedding],
         configuration: TopicModelConfiguration,
         type: TrainingType,
-        shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (TrainingProgress) async -> Void)? = nil
     ) async throws -> TrainingResult {
         let documentIDs = documents.map(\.id)
@@ -174,7 +172,6 @@ public actor InterruptibleTrainingRunner {
             .umapKNN,
             context: &context,
             checkpoint: checkpoint,
-            shouldContinue: shouldContinue,
             onProgress: onProgress
         )
     }
@@ -186,7 +183,6 @@ public actor InterruptibleTrainingRunner {
     ///   - documents: Documents being trained on.
     ///   - embeddings: Pre-computed embeddings.
     ///   - configuration: Training configuration.
-    ///   - shouldContinue: Closure checked between operations. Return false to interrupt.
     ///   - onProgress: Progress callback.
     /// - Returns: Training result with state or new checkpoint.
     public func resumeTraining(
@@ -194,7 +190,6 @@ public actor InterruptibleTrainingRunner {
         documents: [Document],
         embeddings: [Embedding],
         configuration: TopicModelConfiguration,
-        shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (TrainingProgress) async -> Void)? = nil
     ) async throws -> TrainingResult {
         // Check if checkpoint can be resumed
@@ -223,7 +218,6 @@ public actor InterruptibleTrainingRunner {
             checkpoint.currentPhase,
             context: &context,
             checkpoint: updatedCheckpoint,
-            shouldContinue: shouldContinue,
             onProgress: onProgress
         )
     }
@@ -235,7 +229,6 @@ public actor InterruptibleTrainingRunner {
         _ startPhase: TrainingPhase,
         context: inout TrainingContext,
         checkpoint: TrainingCheckpoint,
-        shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (TrainingProgress) async -> Void)?
     ) async throws -> TrainingResult {
         var currentCheckpoint = checkpoint
@@ -243,14 +236,7 @@ public actor InterruptibleTrainingRunner {
 
         while currentPhase != .complete {
             // Check for interruption
-            guard shouldContinue() else {
-                return TrainingResult(
-                    state: nil,
-                    isComplete: false,
-                    checkpoint: currentCheckpoint,
-                    reachedPhase: currentPhase
-                )
-            }
+            try Task.checkCancellation()
 
             // Report progress
             if let onProgress = onProgress {
@@ -271,9 +257,10 @@ public actor InterruptibleTrainingRunner {
                     currentPhase,
                     context: &context,
                     checkpoint: currentCheckpoint,
-                    shouldContinue: shouldContinue,
                     onProgress: onProgress
                 )
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 throw TrainingError.phaseError(phase: currentPhase, underlying: error)
             }
@@ -324,12 +311,11 @@ public actor InterruptibleTrainingRunner {
         _ phase: TrainingPhase,
         context: inout TrainingContext,
         checkpoint: TrainingCheckpoint,
-        shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (TrainingProgress) async -> Void)?
     ) async throws -> PhaseResult {
         switch phase {
         case .umapKNN:
-            return try await executeUMAPKNN(&context, checkpoint: checkpoint, shouldContinue: shouldContinue)
+            return try await executeUMAPKNN(&context, checkpoint: checkpoint)
 
         case .umapFuzzySet:
             return try await executeUMAPFuzzySet(&context, checkpoint: checkpoint)
@@ -338,18 +324,16 @@ public actor InterruptibleTrainingRunner {
             return try await executeUMAPOptimization(
                 &context,
                 checkpoint: checkpoint,
-                shouldContinue: shouldContinue,
                 onProgress: onProgress
             )
 
         case .hdbscanCoreDistance:
-            return try await executeHDBSCANCoreDistance(&context, checkpoint: checkpoint, shouldContinue: shouldContinue)
+            return try await executeHDBSCANCoreDistance(&context, checkpoint: checkpoint)
 
         case .hdbscanMST:
             return try await executeHDBSCANMST(
                 &context,
                 checkpoint: checkpoint,
-                shouldContinue: shouldContinue,
                 onProgress: onProgress
             )
 
@@ -371,12 +355,9 @@ public actor InterruptibleTrainingRunner {
 
     private func executeUMAPKNN(
         _ context: inout TrainingContext,
-        checkpoint: TrainingCheckpoint,
-        shouldContinue: @escaping @Sendable () -> Bool
+        checkpoint: TrainingCheckpoint
     ) async throws -> PhaseResult {
-        guard shouldContinue() else {
-            return .interrupted(checkpoint)
-        }
+        try Task.checkCancellation()
 
         // Build k-NN graph
         let umapConfig = context.configuration.reduction.umapConfig ?? .default
@@ -425,12 +406,13 @@ public actor InterruptibleTrainingRunner {
     private func executeUMAPOptimization(
         _ context: inout TrainingContext,
         checkpoint: TrainingCheckpoint,
-        shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (TrainingProgress) async -> Void)?
     ) async throws -> PhaseResult {
         guard let fuzzySet = context.fuzzySet else {
             throw TrainingError.missingIntermediateState("fuzzySet")
         }
+
+        try Task.checkCancellation()
 
         let umapConfig = context.configuration.reduction.umapConfig ?? .default
         let nEpochs = umapConfig.nEpochs ?? computeAutoEpochs(n: context.embeddings.count)
@@ -501,7 +483,6 @@ public actor InterruptibleTrainingRunner {
             startingEpoch: startingEpoch,
             samplingScheduleState: samplingScheduleState,
             checkpointInterval: umapCheckpointEpochs,
-            shouldContinue: shouldContinue,
             onCheckpoint: { [weak self] info in
                 guard let self = self else { return }
 
@@ -568,12 +549,9 @@ public actor InterruptibleTrainingRunner {
 
     private func executeHDBSCANCoreDistance(
         _ context: inout TrainingContext,
-        checkpoint: TrainingCheckpoint,
-        shouldContinue: @escaping @Sendable () -> Bool
+        checkpoint: TrainingCheckpoint
     ) async throws -> PhaseResult {
-        guard shouldContinue() else {
-            return .interrupted(checkpoint)
-        }
+        try Task.checkCancellation()
 
         guard let reducedEmbeddings = context.reducedEmbeddings else {
             throw TrainingError.missingIntermediateState("reducedEmbeddings")
@@ -615,12 +593,13 @@ public actor InterruptibleTrainingRunner {
     private func executeHDBSCANMST(
         _ context: inout TrainingContext,
         checkpoint: TrainingCheckpoint,
-        shouldContinue: @escaping @Sendable () -> Bool,
         onProgress: (@Sendable (TrainingProgress) async -> Void)?
     ) async throws -> PhaseResult {
         guard let mrGraph = context.mutualReachabilityGraph else {
             throw TrainingError.missingIntermediateState("mutualReachabilityGraph")
         }
+
+        try Task.checkCancellation()
 
         // Check for existing partial MST
         var startingEdges: [MSTEdge]?
@@ -654,7 +633,6 @@ public actor InterruptibleTrainingRunner {
             from: mrGraph,
             startingEdges: startingEdges,
             startingInMST: startingInMST,
-            shouldContinue: shouldContinue,
             onCheckpoint: { [weak self] info in
                 guard let self = self else { return }
 

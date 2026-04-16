@@ -99,7 +99,18 @@ public struct HungarianMatcher: Sendable {
     private func makeSquareMatrix(costs: [[Float]], size: Int) -> [[Float]] {
         let nRows = costs.count
         let nCols = costs[0].count
-        let padding: Float = 1e9  // High cost for padding (not infinity to avoid arithmetic issues)
+
+        // Use relative padding to avoid Float32 precision loss.
+        // Padding as 1e9 can destroy mantissa and break invariants.
+        var maxCost: Float = 0
+        for i in 0..<nRows {
+            for j in 0..<nCols {
+                if costs[i][j].isFinite {
+                    maxCost = max(maxCost, costs[i][j])
+                }
+            }
+        }
+        let padding: Float = maxCost + 1.0
 
         var matrix = [[Float]](repeating: [Float](repeating: padding, count: size), count: size)
         for i in 0..<nRows {
