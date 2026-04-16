@@ -26,7 +26,7 @@
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| **VectorAccelerate** | 0.3.1+ | GPU-accelerated distance computation, matrix operations, top-K selection |
+| **VectorAccelerate** | 0.4.4+ | GPU-accelerated distance computation, matrix operations, top-K selection |
 | **VectorCore** | 0.1.6+ | (Transitive) CPU vector types, distance metrics, batch operations |
 
 VectorAccelerate provides 25+ hand-tuned Metal kernels that eliminate the need to implement low-level math operations. VectorCore provides the foundational vector types and CPU fallbacks.
@@ -660,7 +660,7 @@ let package = Package(
         .library(name: "SwiftTopicsApple", targets: ["SwiftTopicsApple"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/gifton/VectorAccelerate.git", from: "0.3.1"),
+        .package(url: "https://github.com/gifton/VectorAccelerate.git", from: "0.4.4"),
     ],
     targets: [
         .target(

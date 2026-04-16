@@ -82,7 +82,11 @@ public enum AppleNLProvider {
             configuration: config
         )
 
-        return EmbedKitAdapter(model: nlModel, batchOptions: batchOptions)
+        return EmbedKitAdapter(
+            model: nlModel,
+            batchOptions: batchOptions,
+            assumeNormalizedOutput: normalize
+        )
     }
 
     /// Creates a high-throughput embedding provider for batch processing.

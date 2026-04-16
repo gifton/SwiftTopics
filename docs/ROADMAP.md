@@ -14,7 +14,7 @@
 
 ### Dependencies
 
-- **VectorAccelerate** (0.3.1+) - GPU-accelerated kernels for distance, matrix ops, top-K
+- **VectorAccelerate** (0.4.4+) - GPU-accelerated kernels for distance, matrix ops, top-K
 - **VectorCore** (0.1.6+) - Transitive dependency, CPU vector types and operations
 
 ### Scope Reduction from VectorAccelerate

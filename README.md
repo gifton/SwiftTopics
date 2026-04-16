@@ -437,8 +437,8 @@ assignment.alternatives      // [AlternativeAssignment]?
 
 ## Dependencies
 
-- [VectorAccelerate](https://github.com/gifton/VectorAccelerate) (0.3.1+) - GPU-accelerated vector operations
-- [EmbedKit](https://github.com/gifton/EmbedKit) (0.2.7+) - Embedding model framework (SwiftTopicsApple only)
+- [VectorAccelerate](https://github.com/gifton/VectorAccelerate) (0.4.4+) - GPU-accelerated vector operations
+- [EmbedKit](https://github.com/gifton/EmbedKit) (0.3.4+) - Embedding model framework (SwiftTopicsApple only)
 
 ## License
 

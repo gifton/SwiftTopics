@@ -52,6 +52,13 @@ public struct EmbedKitAdapter<Model: EmbeddingModel>: EmbeddingProvider {
     /// Batch options for embedBatch calls.
     private let batchOptions: BatchOptions
 
+    /// Whether to mark produced embeddings as already L2-normalized.
+    ///
+    /// Set this to `true` when the underlying model configuration has
+    /// `normalizeOutput = true` so downstream cosine paths can adopt
+    /// dot-product fast paths when safe.
+    private let assumeNormalizedOutput: Bool
+
     // MARK: - EmbeddingProvider Protocol
 
     /// The dimension of embeddings produced by this provider.
@@ -68,9 +75,14 @@ public struct EmbedKitAdapter<Model: EmbeddingModel>: EmbeddingProvider {
     /// - Parameters:
     ///   - model: The EmbedKit model to wrap.
     ///   - batchOptions: Options for batch embedding operations (default: `.default`).
-    public init(model: Model, batchOptions: BatchOptions = .default) {
+    public init(
+        model: Model,
+        batchOptions: BatchOptions = .default,
+        assumeNormalizedOutput: Bool = false
+    ) {
         self.model = model
         self.batchOptions = batchOptions
+        self.assumeNormalizedOutput = assumeNormalizedOutput
     }
 
     // MARK: - Embedding Methods
@@ -86,7 +98,7 @@ public struct EmbedKitAdapter<Model: EmbeddingModel>: EmbeddingProvider {
     public func embed(_ text: String) async throws -> Embedding {
         do {
             let ekEmbedding = try await model.embed(text)
-            return Embedding(vector: ekEmbedding.vector)
+            return Embedding(vector: ekEmbedding.vector, isNormalized: assumeNormalizedOutput)
         } catch {
             throw EmbeddingError.modelError(underlying: error)
         }
@@ -105,7 +117,7 @@ public struct EmbedKitAdapter<Model: EmbeddingModel>: EmbeddingProvider {
 
         do {
             let ekEmbeddings = try await model.embedBatch(texts, options: batchOptions)
-            return ekEmbeddings.map { Embedding(vector: $0.vector) }
+            return ekEmbeddings.map { Embedding(vector: $0.vector, isNormalized: assumeNormalizedOutput) }
         } catch {
             throw EmbeddingError.modelError(underlying: error)
         }
@@ -123,8 +135,8 @@ extension EmbedKitAdapter {
     ///
     /// - Parameter model: The EmbedKit model to wrap.
     /// - Returns: An adapter configured for high throughput.
-    public static func highThroughput(model: Model) -> EmbedKitAdapter<Model> {
-        EmbedKitAdapter(model: model, batchOptions: .highThroughput)
+    public static func highThroughput(model: Model, assumeNormalizedOutput: Bool = false) -> EmbedKitAdapter<Model> {
+        EmbedKitAdapter(model: model, batchOptions: .highThroughput, assumeNormalizedOutput: assumeNormalizedOutput)
     }
 
     /// Creates an adapter with low-latency batch options.
@@ -134,7 +146,7 @@ extension EmbedKitAdapter {
     ///
     /// - Parameter model: The EmbedKit model to wrap.
     /// - Returns: An adapter configured for low latency.
-    public static func lowLatency(model: Model) -> EmbedKitAdapter<Model> {
-        EmbedKitAdapter(model: model, batchOptions: .lowLatency)
+    public static func lowLatency(model: Model, assumeNormalizedOutput: Bool = false) -> EmbedKitAdapter<Model> {
+        EmbedKitAdapter(model: model, batchOptions: .lowLatency, assumeNormalizedOutput: assumeNormalizedOutput)
     }
 }
