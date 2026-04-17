@@ -836,7 +836,7 @@ For very large corpora (>50k documents):
 ---
 
 *Spec Version: 1.0*
-*Library Version: 0.1.0-beta.1*
+*Library Version: 0.1.0-beta.2*
 *Created: January 2025*
 *Last Updated: January 2026*
 *Author: SwiftTopics Design Team*

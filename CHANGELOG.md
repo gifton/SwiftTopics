@@ -50,6 +50,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0-beta.2] - 2026-04-14
+
+### Changed
+- **Architectural Decoupling**: Refactored `TopicModel` to depend on `DimensionReducer`, `ClusteringEngine`, and `TopicRepresenter` protocols, guided by the open/closed principle.
+- **Memory Efficiency**: Prevented `FittedTopicModelState` from retaining documents and embeddings indefinitely, massively lowering memory consumption on large corpora.
+- **Probability Normalization**: Swapped softmax for UMAP's student-t distribution during topic assignment to preserve mathematical soundness in high-dimensional spaces.
+- **MST Performance**: Eliminated an O(N² log N) bottleneck inside Prim's algorithm using array-backed dense processing. 
+- **Storage Bottlenecks**: Remedied high allocation and memory fragmentation rates when serializing large `Embedding` buffers to binary via pointer-oriented appends.
+- **Interruption/Task Cancelation**: Replaced the custom unsafe `shouldContinue` closures with native Swift `Task.checkCancellation()` patterns.
+- **Dependencies**: Bumped `VectorAccelerate` to 0.4.4 and `EmbedKit` to 0.3.4.
+
 ### Planned
 - Hierarchical topic support
 - Dynamic/temporal topic modeling

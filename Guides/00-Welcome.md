@@ -300,4 +300,4 @@ Ready to understand how text becomes topics?
 
 ---
 
-*SwiftTopics Learning Guide • Version 0.1.0-beta.1 • January 2026*
+*SwiftTopics Learning Guide • Version 0.1.0-beta.2 • April 2026*

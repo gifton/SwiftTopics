@@ -12,7 +12,7 @@ import VectorCore
 /// SwiftTopics library version
 public enum SwiftTopics {
     /// Current library version (semantic versioning)
-    public static let version = "0.1.0-beta.1"
+    public static let version = "0.1.0-beta.2"
 
     /// Whether this is a beta/pre-release version
     public static let isBeta = true
