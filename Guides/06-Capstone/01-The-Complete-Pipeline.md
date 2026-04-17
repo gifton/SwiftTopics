@@ -424,7 +424,7 @@ if let top = assignments.first {
 
 ```swift
 // If two topics seem to overlap, merge them
-let merged = try await model.merge(topics: [0, 2])
+let merged = try await model.merge(topics: [0, 2], documents: documents, embeddings: embeddings)
 
 print("Merged topic: \(merged.keywordSummary())")
 print("Combined size: \(merged.size)")
@@ -437,7 +437,7 @@ print("Combined size: \(merged.size)")
 
 ```swift
 // Hierarchical reduction to target count
-let reducedTopics = try await model.reduce(to: 5)
+let reducedTopics = try await model.reduce(to: 5, documents: documents, embeddings: embeddings)
 
 print("Reduced to \(reducedTopics.count) topics")
 for topic in reducedTopics {

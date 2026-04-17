@@ -350,10 +350,10 @@ let config = TopicModelConfiguration(
 )
 
 // Solution B: Manually merge similar topics
-let mergedTopic = try await model.merge(topics: [0, 1, 2])
+let mergedTopic = try await model.merge(topics: [0, 1, 2], documents: documents, embeddings: embeddings)
 
 // Solution C: Reduce topic count programmatically
-let reducedTopics = try await model.reduce(to: 5)
+let reducedTopics = try await model.reduce(to: 5, documents: documents, embeddings: embeddings)
 ```
 
 #### Cause 2: Use EOM Instead of Leaf
@@ -681,12 +681,13 @@ let assignment = try await model.transform(...)
 // Fix: Provide embedding provider to fit
 
 // ❌ Can't search without provider
-let result = try await model.fit(docs, embeddings: precomputedEmbeddings)
-let results = try await model.search(query: "test")  // Throws!
+let result = try await model.fit(documents: docs, embeddings: precomputedEmbeddings)
+let results = try await model.search(query: "test", documents: docs, embeddings: precomputedEmbeddings)  // Throws!
 
 // ✅ Provide provider
-let result = try await model.fit(docs, embeddingProvider: provider)
-let results = try await model.search(query: "test")  // Works
+let result = try await model.fit(documents: docs, embeddingProvider: provider)
+let embeddings = try await provider.embedBatch(docs.map(\.content))
+let results = try await model.search(query: "test", documents: docs, embeddings: embeddings)  // Works
 ```
 
 ---

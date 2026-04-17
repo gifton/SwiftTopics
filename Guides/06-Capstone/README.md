@@ -51,9 +51,9 @@ This chapter shows you how to go from theory to production.
 │  │                                                                  │   │
 │  │  fit(documents:embeddings:) → TopicModelResult                  │   │
 │  │  transform(documents:embeddings:) → [TopicAssignment]           │   │
-│  │  search(query:) → [(Document, score)]                           │   │
-│  │  merge(topics:) → Topic                                         │   │
-│  │  reduce(to:) → [Topic]                                          │   │
+│  │  search(query:documents:embeddings:topK:) → [(Doc, Float)]      │   │
+│  │  merge(topics:documents:embeddings:) → Topic                    │   │
+│  │  reduce(to:documents:embeddings:) → [Topic]                     │   │
 │  │                                                                  │   │
 │  └─────────────────────────────────────────────────────────────────┘   │
 │                               ↓                                         │
